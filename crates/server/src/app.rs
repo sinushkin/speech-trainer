@@ -5,7 +5,7 @@ use crate::dialog;
 use crate::prompt::system_prompt;
 use crate::session::{Out, Session};
 use crate::stt::WhisperTranscriber;
-use crate::tts::NoSpeech;
+use crate::tts::PiperSynthesizer;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -23,7 +23,7 @@ pub struct AppState {
     pub dialogs_dir: PathBuf,
     pub claude: ClaudeConfig,
     pub stt: Arc<WhisperTranscriber>,
-    pub tts: Arc<NoSpeech>,
+    pub tts: Arc<PiperSynthesizer>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {

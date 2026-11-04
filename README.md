@@ -28,13 +28,14 @@ model for this project; the resident-Claude approach comes from its
 
 ## Status
 
-Early development; see `docs/ARCHITECTURE.md`. English speech recognition works
-(whisper.cpp). Speech synthesis is not implemented yet, so replies are text only.
+Early development; see `docs/ARCHITECTURE.md`. English speech recognition
+(whisper.cpp) and English/Russian speech synthesis (Piper voices) work; the whole
+audio loop is covered by one ignored test, `audio_loop.rs`.
 
 ## Run
 
 ```
-# one-time: a whisper.cpp model, e.g. ggml-small.en.bin from huggingface.co/ggerganov/whisper.cpp
+# one-time: the Piper binary and voices in ~/.cache/speech-trainer (see CLAUDE.md), and a whisper.cpp model, e.g. ggml-small.en.bin from huggingface.co/ggerganov/whisper.cpp
 export SPEECH_TRAINER_MODEL=~/.cache/speech-trainer/ggml-small.en.bin
 export SPEECH_TRAINER_DIALOGS=/path/to/english-transcripts/dialogs
 cargo run --release -p server                       # listens on 127.0.0.1:8765

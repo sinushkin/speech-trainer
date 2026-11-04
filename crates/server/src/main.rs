@@ -1,4 +1,6 @@
 mod app;
+#[cfg(test)]
+mod audio_loop;
 mod backend;
 mod claude;
 mod dialog;
@@ -39,7 +41,7 @@ async fn main() -> Result<()> {
         dialogs_dir,
         claude: claude::ClaudeConfig::from_env(),
         stt: Arc::new(stt::WhisperTranscriber::load(&model, "en").context("cannot load the speech recognition model")?),
-        tts: Arc::new(tts::NoSpeech),
+        tts: Arc::new(tts::PiperSynthesizer::start(&tts::PiperConfig::from_env())),
     });
 
     let listener = tokio::net::TcpListener::bind(&bind).await.with_context(|| format!("cannot bind {bind}"))?;

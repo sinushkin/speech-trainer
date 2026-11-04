@@ -23,7 +23,8 @@ Cargo-воркспейс (edition 2024), три крейта:
 | `.../backend.rs` | трейты `Tutor`, `Transcriber`, `Synthesizer` и `BackendError`; реальные реализации и тестовые заглушки подставляются через них |
 | `.../session.rs` | один ход диалога: реплика → распознавание → тьютор → озвучка и ссылки → клиенту. Ссылку пропускает, только если её URL есть на карточке текущего диалога. Тестируется на заглушках |
 | `.../stt.rs` | распознавание речи: whisper.cpp через `whisper-rs`, только английский, модель грузится один раз, декодирование в `spawn_blocking` |
-| `.../tts.rs` | **заглушка `NoSpeech`**: озвучки пока нет, клиент получает только текст. Сюда придёт Piper (английский и русский) |
+| `.../tts.rs` | озвучка Piper: по одному постоянному процессу `piper --json-input` на язык (английский и русский), запрос — строка JSON, ответ — путь записанного WAV. Если голос не запустился, язык просто недоступен, урок идёт текстом |
+| `.../audio_loop.rs` | единственный «сквозной» тест (`#[ignore]`, нужны модели): смешанная русско-английская фраза → Piper → mp3 → воспроизведение → Whisper → ход `Session` с заглушкой вместо Claude → озвученный ответ |
 | `.../app.rs` | axum: `GET /dialogs` (список), `GET /ws` (сессия), склейка сокета и `Session` |
 | `.../main.rs` | настройка из переменных окружения, запуск |
 | `crates/client/src/vad.rs` | детектор голоса по энергии (порт параметров из LangTeacher): калибровка шума, 240 мс предзахвата, 800 мс тишины в конце, минимум 300 мс, максимум 15 с |
@@ -38,9 +39,11 @@ Cargo-воркспейс (edition 2024), три крейта:
   ggml `small.en` из `ggerganov/whisper.cpp` на Hugging Face). Физически `~/.cache` это
   симлинк на `/home/user/data/user-cache/.cache` (диск `/home/user/data`). В git не
   входит. Рядом: `fetch.sh` (скрипт параллельной докачки) и логи.
-- **Голос Piper** (понадобится для озвучки): `~/langteacher/piper_voices/en_US-amy-medium.onnx`
-  (+ `.onnx.json`), 63 МБ. **Русского голоса пока нет**: его нужно докачать
-  (`rhasspy/piper-voices` на Hugging Face, например `ru_RU-irina-medium`).
+- **Piper** (озвучка): готовый бинарник `~/.cache/speech-trainer/piper/piper` (релиз
+  rhasspy/piper 2023.11.14-2, внутри espeak-ng и onnxruntime) и голоса в
+  `~/.cache/speech-trainer/voices/`: `en_US-amy-medium` (копия из `~/langteacher/piper_voices/`)
+  и `ru_RU-irina-medium` (скачан с `rhasspy/piper-voices`), по 63 МБ + `.onnx.json`.
+  Piper работает примерно в 30 раз быстрее реального времени на CPU.
 - **Диалоги**: `~/repos/english-transcripts/dialogs/` (45 штук), путь задаётся
   `SPEECH_TRAINER_DIALOGS`. Тестовый образец лежит в `crates/server/tests/fixtures/`.
 - **Старые модели из langteacher, здесь не используются**: кэш faster-whisper
@@ -50,8 +53,10 @@ Cargo-воркспейс (edition 2024), три крейта:
 
 ### Как докачивать большие файлы (сеть здесь медленная)
 
-Одно соединение даёт ~30 КБ/с, а 15 параллельных потоков с диапазонами около 500 КБ/с.
-Образец: `~/.cache/speech-trainer/fetch.sh` (поменяйте `URL` и `TOTAL`). Копировать файл с VPS
+Одно соединение даёт ~30 КБ/с, а 12-15 параллельных потоков с диапазонами около 500 КБ/с.
+Универсальный скрипт: `~/.cache/speech-trainer/pfetch.sh URL ВЫХОДНОЙ_ФАЙЛ РАЗМЕР_В_БАЙТАХ`
+(размер берётся из `curl -sIL URL`, заголовок `content-length`). Старый `fetch.sh` лежит
+рядом, он был написан под файл Whisper. Копировать файл с VPS
 `profit` по `scp` ещё медленнее (~17 КБ/с), поэтому через него качать не стоит.
 
 ## Запуск
@@ -65,7 +70,10 @@ cargo run --release -p client -- 16_the_job_interview --text   # с клавиа
 ```
 
 Переменные окружения: `SPEECH_TRAINER_BIND`, `SPEECH_TRAINER_MODEL`,
-`SPEECH_TRAINER_DIALOGS`, `SPEECH_TRAINER_CLAUDE_BIN` (по умолчанию `claude`),
+`SPEECH_TRAINER_DIALOGS`, `SPEECH_TRAINER_PIPER` (бинарник, по умолчанию
+`~/.cache/speech-trainer/piper/piper`), `SPEECH_TRAINER_VOICES` (папка голосов),
+`SPEECH_TRAINER_VOICE_EN`/`SPEECH_TRAINER_VOICE_RU` (имена голосов),
+`SPEECH_TRAINER_CLAUDE_BIN` (по умолчанию `claude`),
 `SPEECH_TRAINER_CLAUDE_MODEL` (по умолчанию `haiku`), `SPEECH_TRAINER_CLAUDE_PROXY`
 (HTTP-прокси для процесса claude; на этой машине `http://127.0.0.1:8118`),
 клиент: `SPEECH_TRAINER_URL`, `SPEECH_TRAINER_ARECORD_DEVICE`, `SPEECH_TRAINER_APLAY_DEVICE`.
@@ -76,8 +84,13 @@ cargo run --release -p client -- 16_the_job_interview --text   # с клавиа
 
 `cargo test` проходит без моделей: сессия проверяется на заглушках, `claude.rs` на
 shell-скрипте, который говорит по протоколу stream-json, VAD на синтетических сигналах.
-Один тест требует реальную модель и помечен `#[ignore]`:
-`SPEECH_TRAINER_MODEL=~/.cache/speech-trainer/ggml-small.en.bin cargo test -p server --release -- --ignored`.
+Два теста требуют реальные модели и помечены `#[ignore]`; запуск:
+`cargo test -p server --release -- --ignored --nocapture` (нужны модель Whisper, Piper с
+двумя голосами, `ffmpeg` с libmp3lame и `aplay`; `SPEECH_TRAINER_NO_PLAYBACK=1` отключает
+звук). Сквозной тест из `audio_loop.rs` пишет mp3 в `/tmp/speech-trainer-mixed-ru-en.mp3`;
+образец лежит в `crates/server/tests/fixtures/mixed_ru_en.mp3`. Whisper здесь английский
+(`small.en`), поэтому русские куски фразы он не распознаёт, и тест проверяет только
+английскую часть («around the clock»).
 `cargo clippy --all-targets` чистый.
 
 ## Соглашения
@@ -90,13 +103,13 @@ shell-скрипте, который говорит по протоколу stre
 
 ## Состояние и что дальше
 
-Готово: протокол, разбор диалогов, сессия тьютора, распознавание английской речи
-(проверено на реальной модели), WebSocket-сервер, клиент с VAD, сквозной прогон с
-заглушкой вместо `claude`.
+Готово: протокол, разбор диалогов, сессия тьютора, распознавание английской речи и
+озвучка Piper на двух языках (проверено на реальных моделях сквозным тестом), WebSocket-сервер,
+клиент с VAD, сквозной прогон с заглушкой вместо `claude`.
 
 Не готово и не проверено:
-1. **Озвучка** (английский и русский): Piper. Два пути: готовый бинарник `piper` как
-   постоянный процесс (быстрее сделать) или нативно через `ort` + espeak-ng.
-2. Работа с живым `claude -p` и с микрофоном (VAD пока проверен только синтетикой).
-3. Клиент для телефона (браузер, WebSocket), если нужна ходьба по локальной сети.
+1. Работа с живым `claude -p` и с микрофоном (VAD пока проверен только синтетикой; воспроизведение
+   в тесте идёт через `aplay`, но услышать звук можно только на самой машине).
+2. Клиент для телефона (браузер, WebSocket), если нужна ходьба по локальной сети.
+3. Нативный Piper на `ort` + espeak-ng вместо готового бинарника (если нужен один бинарник).
 4. Распознавание русской речи не нужно: учащийся отвечает по-английски.
