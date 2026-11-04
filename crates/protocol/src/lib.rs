@@ -25,6 +25,9 @@ pub enum ClientMsg {
     },
     /// Typed input that bypasses speech recognition (development and tests).
     Text { text: String },
+    /// The learner stayed silent through the window announced by
+    /// [`ServerMsg::ContinueIfSilent`]; the tutor goes on by itself.
+    Continue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +42,10 @@ pub enum ServerMsg {
     Reply { text: String },
     /// A link to the source video moment, shown after feedback.
     Link { url: String, label: String },
+    /// Sent just before `turn_done` when the tutor will go on by itself: if the
+    /// learner has not started speaking `after_ms` after the audio finished,
+    /// the client sends [`ClientMsg::Continue`].
+    ContinueIfSilent { after_ms: u32 },
     /// The tutor finished this turn: all audio was sent, the mic may open again.
     TurnDone,
     Error { message: String },
@@ -61,6 +68,13 @@ mod tests {
     }
 
     #[test]
+    fn continue_is_a_bare_tagged_message() -> Result<(), serde_json::Error> {
+        assert_eq!(serde_json::to_string(&ClientMsg::Continue)?, r#"{"type":"continue"}"#);
+        assert_eq!(serde_json::from_str::<ClientMsg>(r#"{"type":"continue"}"#)?, ClientMsg::Continue);
+        Ok(())
+    }
+
+    #[test]
     fn hello_without_a_dialog_is_valid() -> Result<(), serde_json::Error> {
         assert_eq!(serde_json::from_str::<ClientMsg>(r#"{"type":"hello"}"#)?, ClientMsg::Hello { dialog: None });
         assert_eq!(serde_json::to_string(&ClientMsg::Hello { dialog: None })?, r#"{"type":"hello"}"#);
@@ -73,6 +87,7 @@ mod tests {
             ServerMsg::Ready { dialogs: 45 },
             ServerMsg::Transcript { text: "hello".into() },
             ServerMsg::Link { url: "https://youtu.be/x?t=1".into(), label: "x @ 0:01".into() },
+            ServerMsg::ContinueIfSilent { after_ms: 3000 },
             ServerMsg::TurnDone,
             ServerMsg::Error { message: "boom".into() },
             ServerMsg::SessionEnded { reason: "idle".into() },

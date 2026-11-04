@@ -22,6 +22,9 @@ pub enum Out {
 #[derive(Debug)]
 pub struct Closed;
 
+/// What the tutor is told when the learner stayed silent through the window after feedback.
+pub const CONTINUE_MESSAGE: &str = "[The learner said nothing. Continue with the next card.]";
+
 /// Utterances shorter than this are treated as noise and ignored.
 const MIN_UTTERANCE_SAMPLES: usize = (SAMPLE_RATE as usize) * 3 / 10;
 
@@ -30,6 +33,8 @@ const MIN_UTTERANCE_SAMPLES: usize = (SAMPLE_RATE as usize) * 3 / 10;
 pub enum Incoming {
     Utterance(Vec<u8>),
     Text(String),
+    /// The client's silence window after feedback passed: the tutor goes on.
+    Continue,
     /// A frame that needs no action.
     Ignore,
     /// A frame the server cannot understand; ends the session.
@@ -54,11 +59,20 @@ pub struct Session<T, S, V> {
     stt: Arc<S>,
     tts: Arc<V>,
     out: mpsc::Sender<Out>,
+    /// How long the client waits for the learner after a feedback turn.
+    continue_after: Duration,
 }
 
 impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
-    pub fn new(allowed_urls: Arc<HashSet<String>>, tutor: T, stt: Arc<S>, tts: Arc<V>, out: mpsc::Sender<Out>) -> Self {
-        Self { allowed_urls, tutor, stt, tts, out }
+    pub fn new(
+        allowed_urls: Arc<HashSet<String>>,
+        tutor: T,
+        stt: Arc<S>,
+        tts: Arc<V>,
+        out: mpsc::Sender<Out>,
+        continue_after: Duration,
+    ) -> Self {
+        Self { allowed_urls, tutor, stt, tts, out, continue_after }
     }
 
     async fn emit(&self, o: Out) -> Result<(), Closed> {
@@ -87,6 +101,7 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
                 Some(Incoming::Ignore) => Ok(()),
                 Some(Incoming::Utterance(pcm)) => self.on_utterance(&pcm).await,
                 Some(Incoming::Text(text)) => self.on_text(&text).await,
+                Some(Incoming::Continue) => self.on_continue().await,
             };
             if served.is_err() {
                 return End::ClientGone;
@@ -120,6 +135,11 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         self.run_turn(text).await
     }
 
+    /// The learner stayed silent after feedback: the tutor moves on by itself.
+    pub async fn on_continue(&mut self) -> Result<(), Closed> {
+        self.run_turn(CONTINUE_MESSAGE).await
+    }
+
     async fn fail(&self, message: String) -> Result<(), Closed> {
         tracing::warn!("{message}");
         self.msg(ServerMsg::Error { message }).await?;
@@ -133,8 +153,10 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         };
         let segments = markup::parse_reply(&raw);
         self.msg(ServerMsg::Reply { text: markup::display_text(&segments) }).await?;
+        let mut go_on_alone = false;
         for segment in segments {
             match segment {
+                Segment::Continue => go_on_alone = true,
                 Segment::Say { lang, text } => match self.tts.synthesize(lang, &text).await {
                     Ok(audio) => self.emit(Out::Audio(audio)).await?,
                     // A missing voice must not end the lesson: the text was already sent.
@@ -148,6 +170,10 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
                     }
                 }
             }
+        }
+        if go_on_alone {
+            let after_ms = u32::try_from(self.continue_after.as_millis()).unwrap_or(u32::MAX);
+            self.msg(ServerMsg::ContinueIfSilent { after_ms }).await?;
         }
         self.msg(ServerMsg::TurnDone).await
     }
@@ -212,7 +238,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(64);
         let heard = Arc::new(Mutex::new(Vec::new()));
         let tutor = FakeTutor { replies, heard: heard.clone() };
-        let session = Session::new(Arc::new(urls), tutor, Arc::new(FakeStt(stt_text)), Arc::new(FakeTts), tx);
+        let session = Session::new(Arc::new(urls), tutor, Arc::new(FakeStt(stt_text)), Arc::new(FakeTts), tx, Duration::from_secs(3));
         Ok(Rig { session, rx, heard, url })
     }
 
@@ -235,6 +261,7 @@ mod tests {
                 Out::Msg(ServerMsg::TurnDone) => "done",
                 Out::Msg(ServerMsg::Error { .. }) => "error",
                 Out::Msg(ServerMsg::SessionEnded { .. }) => "ended",
+                Out::Msg(ServerMsg::ContinueIfSilent { .. }) => "continue-if-silent",
             })
             .collect()
     }
@@ -272,6 +299,23 @@ mod tests {
         r.session.on_text("hi").await.map_err(|_| "closed")?;
         let outs = drain(&mut r.rx);
         assert_eq!(kinds(&outs), vec!["transcript", "reply", "audio", "link", "done"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_feedback_turn_announces_that_the_lesson_goes_on_by_itself() -> Result<(), Box<dyn std::error::Error>> {
+        let feedback = "<say lang=\"en\">Good. A native speaker would say: take your time.</say><continue/>".to_string();
+        let next = "<say lang=\"en\">Next card.</say><say lang=\"ru\">Подсказка.</say>".to_string();
+        let mut r = rig(vec![Ok(feedback), Ok(next)], "")?;
+        r.session.on_text("don't rush").await.map_err(|_| "closed")?;
+        let outs = drain(&mut r.rx);
+        assert_eq!(kinds(&outs), vec!["transcript", "reply", "audio", "continue-if-silent", "done"]);
+        assert_eq!(outs[3], Out::Msg(ServerMsg::ContinueIfSilent { after_ms: 3000 }));
+
+        // The client's silence window passed: the tutor is told so and asks the next card.
+        r.session.on_continue().await.map_err(|_| "closed")?;
+        assert_eq!(kinds(&drain(&mut r.rx)), vec!["reply", "audio", "audio", "done"]);
+        assert_eq!(r.heard.lock().map_err(|_| "poisoned")?.as_slice(), ["don't rush", CONTINUE_MESSAGE]);
         Ok(())
     }
 

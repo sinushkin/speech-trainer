@@ -90,6 +90,11 @@ impl Vad {
         (self.cfg.sample_rate as usize * ms as usize) / 1000
     }
 
+    /// True while a phrase is being captured (speech has started and not ended yet).
+    pub fn in_speech(&self) -> bool {
+        self.in_speech
+    }
+
     /// Forget any partial utterance (used while the tutor is speaking). The noise
     /// floor stays calibrated.
     pub fn reset(&mut self) {
@@ -188,6 +193,18 @@ mod tests {
         let ms = out[0].len() * 1000 / 16_000;
         // preroll (240) + speech (900) + trailing silence (~810)
         assert!((1_800..2_100).contains(&ms), "utterance was {ms} ms");
+    }
+
+    #[test]
+    fn in_speech_is_true_only_while_a_phrase_is_being_captured() {
+        let mut vad = Vad::new(short_pause());
+        assert!(!vad.in_speech());
+        run(&mut vad, &[frames(20, 600)]);
+        assert!(!vad.in_speech(), "silence is not speech");
+        run(&mut vad, &[frames(3_000, 300)]);
+        assert!(vad.in_speech(), "a phrase has started");
+        run(&mut vad, &[frames(20, 1_000)]);
+        assert!(!vad.in_speech(), "the phrase has ended");
     }
 
     #[test]

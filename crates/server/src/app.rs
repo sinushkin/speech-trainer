@@ -71,6 +71,7 @@ fn to_incoming(frame: Result<Message, axum::Error>) -> Incoming {
         Ok(Message::Binary(pcm)) => Incoming::Utterance(pcm.to_vec()),
         Ok(Message::Text(t)) => match serde_json::from_str::<ClientMsg>(&t) {
             Ok(ClientMsg::Text { text }) => Incoming::Text(text),
+            Ok(ClientMsg::Continue) => Incoming::Continue,
             Ok(ClientMsg::Hello { .. }) => Incoming::Ignore,
             Err(e) => Incoming::Invalid(format!("bad message: {e}")),
         },
@@ -148,7 +149,14 @@ async fn run_session(
 
     let tutor = ClaudeSession::spawn(&st.claude, &st.prompt, &st.instruction.dialogs_dir)
         .map_err(|e| format!("cannot start claude: {e}"))?;
-    let mut session = Session::new(st.urls.clone(), tutor, st.stt.clone(), st.tts.clone(), tx.clone());
+    let mut session = Session::new(
+        st.urls.clone(),
+        tutor,
+        st.stt.clone(),
+        st.tts.clone(),
+        tx.clone(),
+        st.instruction.correction_pause,
+    );
 
     if session.begin(&first_message, st.library.entries.len()).await.is_err() {
         return Ok(());

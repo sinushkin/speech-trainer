@@ -19,12 +19,23 @@ fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+/// Resolves at `deadline`; never resolves when there is none.
+async fn wait_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 fn show(msg: &ServerMsg) {
     match msg {
         ServerMsg::Ready { dialogs } => println!("== session started ({dialogs} dialogs available; say \"another dialog\" to switch)"),
         ServerMsg::Transcript { text } => println!("you:   {text}"),
         ServerMsg::Reply { text } => println!("tutor: {text}"),
         ServerMsg::Link { url, label } => println!("watch: {label}  {url}"),
+        ServerMsg::ContinueIfSilent { after_ms } => {
+            println!("(say \"in Russian\" within {:.0} s for the Russian version, or stay silent to go on)", f64::from(*after_ms) / 1000.0);
+        }
         ServerMsg::TurnDone => {}
         ServerMsg::Error { message } => eprintln!("error: {message}"),
         ServerMsg::SessionEnded { reason } => println!("== session ended: {reason}"),
@@ -94,6 +105,10 @@ async fn main() -> Result<()> {
         ..vad::VadConfig::default()
     });
     let mut listening = false; // false until the tutor's first turn is done
+    // After a correction the tutor waits a moment for the learner (who may ask
+    // "in Russian"); if nobody speaks it goes on by itself.
+    let mut silence_window: Option<u32> = None; // announced by the server, armed at turn_done
+    let mut continue_deadline: Option<tokio::time::Instant> = None;
     if !text_mode {
         println!(
             "calibrating the microphone, stay quiet for a moment... (an answer ends after {:.1} s of silence; --pause-ms changes that)",
@@ -112,10 +127,18 @@ async fn main() -> Result<()> {
                             if matches!(msg, ServerMsg::SessionEnded { .. }) {
                                 break;
                             }
+                            if let ServerMsg::ContinueIfSilent { after_ms } = msg {
+                                silence_window = Some(after_ms);
+                            }
                             if matches!(msg, ServerMsg::TurnDone) {
                                 while mic_rx.try_recv().is_ok() {} // stale audio from while the tutor spoke
                                 vad.reset();
                                 listening = true;
+                                // Typing takes longer than a speech window, so text mode never auto-continues.
+                                continue_deadline = silence_window
+                                    .take()
+                                    .filter(|_| !text_mode)
+                                    .map(|ms| tokio::time::Instant::now() + std::time::Duration::from_millis(u64::from(ms)));
                                 if !text_mode { println!("(your turn, speak)"); }
                             }
                         }
@@ -130,6 +153,14 @@ async fn main() -> Result<()> {
                     _ => {}
                 }
             }
+            () = wait_until(continue_deadline) => {
+                continue_deadline = None;
+                // Someone already started speaking: that answer is coming, do not interrupt it.
+                if listening && !vad.in_speech() {
+                    listening = false;
+                    sink.send(Message::Text(serde_json::to_string(&ClientMsg::Continue)?.into())).await?;
+                }
+            }
             frame = mic_rx.recv(), if !text_mode => {
                 let Some(frame) = frame else { break };
                 if !listening {
@@ -139,6 +170,7 @@ async fn main() -> Result<()> {
                 }
                 if let Some(utterance) = vad.feed(&frame) {
                     listening = false;
+                    continue_deadline = None;
                     sink.send(Message::Binary(wav::pcm16_to_bytes(&utterance).into())).await?;
                 }
             }
@@ -146,7 +178,12 @@ async fn main() -> Result<()> {
                 let Some(line) = line else { break };
                 if !listening || line.trim().is_empty() { continue; }
                 listening = false;
-                let msg = serde_json::to_string(&ClientMsg::Text { text: line })?;
+                // `/continue` plays the part of the silence window in text mode.
+                let msg = if line.trim() == "/continue" {
+                    serde_json::to_string(&ClientMsg::Continue)?
+                } else {
+                    serde_json::to_string(&ClientMsg::Text { text: line })?
+                };
                 sink.send(Message::Text(msg.into())).await?;
             }
         }

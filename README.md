@@ -44,7 +44,8 @@ cargo run --release -p client -- --text                         # type
 cargo run --release -p client -- --pause-ms 3000                # wait longer while you think (default 2000)
 ```
 
-Every connection gets its own Claude process (Haiku, read-only tools inside the dialogs
+After a correction (given in English only) the client waits a few seconds: say "In Russian" for the
+Russian version, or stay silent and the lesson goes on. Every connection gets its own Claude process (Haiku, read-only tools inside the dialogs
 folder) that is stopped after the idle timeout (30 minutes). Settings: `SPEECH_TRAINER_BIND`, `SPEECH_TRAINER_CLAUDE_MODEL` (overrides `model` in `Instruction.md`),
 `SPEECH_TRAINER_CLAUDE_PROXY` (optional HTTP proxy for the claude process),
 `SPEECH_TRAINER_URL` (client), `SPEECH_TRAINER_ARECORD_DEVICE`, `SPEECH_TRAINER_APLAY_DEVICE`.

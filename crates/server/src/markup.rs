@@ -1,7 +1,9 @@
 //! Parses the tutor's tagged reply into things to speak and links to show.
 //!
 //! The tutor is told to answer only with
-//! `<say lang="en">…</say>`, `<say lang="ru">…</say>` and `<link url="…">label</link>`.
+//! `<say lang="en">…</say>`, `<say lang="ru">…</say>`, `<link url="…">label</link>`
+//! and the bare `<continue/>`, which ends a feedback turn: the lesson goes on by
+//! itself unless the learner speaks within a short window.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -22,6 +24,8 @@ impl Lang {
 pub enum Segment {
     Say { lang: Lang, text: String },
     Link { url: String, label: String },
+    /// "Go on by yourself if the learner stays silent."
+    Continue,
 }
 
 /// Splits a reply into segments. Text without any tag is treated as English speech,
@@ -36,6 +40,8 @@ pub fn parse_reply(raw: &str) -> Vec<Segment> {
             parse_say(after)
         } else if after.starts_with("<link") {
             parse_link(after)
+        } else if after.starts_with("<continue") {
+            parse_continue(after)
         } else {
             None
         };
@@ -93,13 +99,18 @@ fn parse_link(s: &str) -> Option<(Option<Segment>, usize)> {
     Some((Some(Segment::Link { url, label }), consumed))
 }
 
+fn parse_continue(s: &str) -> Option<(Option<Segment>, usize)> {
+    let end = s.find('>')?;
+    Some((Some(Segment::Continue), end + 1))
+}
+
 /// Plain text of the spoken parts, for display.
 pub fn display_text(segments: &[Segment]) -> String {
     segments
         .iter()
         .filter_map(|s| match s {
             Segment::Say { text, .. } => Some(text.as_str()),
-            Segment::Link { .. } => None,
+            Segment::Link { .. } | Segment::Continue => None,
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -137,6 +148,18 @@ mod tests {
         assert_eq!(parse_reply("1 < 2 and 3 > 2"), vec![say(Lang::En, "1 < 2 and 3 > 2")]);
         assert_eq!(parse_reply("<say lang=\"en\">cut off mid"), vec![say(Lang::En, "cut off mid")]);
         assert!(parse_reply("<say lang=\"en\"></say>").is_empty());
+    }
+
+    #[test]
+    fn the_continue_tag_is_recognised_in_both_spellings() {
+        for tag in ["<continue/>", "<continue />", "<continue></continue>"] {
+            let raw = format!("<say lang=\"en\">Good.</say>{tag}");
+            let segs = parse_reply(&raw);
+            assert_eq!(segs.first(), Some(&say(Lang::En, "Good.")), "{tag}");
+            assert_eq!(segs.get(1), Some(&Segment::Continue), "{tag}");
+        }
+        // The tag alone is not spoken text, so nothing falls back to "untagged English".
+        assert_eq!(parse_reply("<continue/>"), vec![Segment::Continue]);
     }
 
     #[test]
