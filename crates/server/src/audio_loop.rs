@@ -18,6 +18,7 @@ use protocol::{ServerMsg, wav};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -88,7 +89,18 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
         eprintln!("SKIPPED audio loop test, missing: {missing}");
         return Ok(());
     }
+    let t0 = Instant::now();
+    let mut mark = Instant::now();
+    let mut lap = |what: &str, audio_seconds: Option<f32>| {
+        let took = mark.elapsed().as_secs_f32();
+        match audio_seconds {
+            Some(a) if took > 0.0 => println!("[timing] {what}: {took:.2} s for {a:.1} s of audio ({:.1}x real time)", a / took),
+            _ => println!("[timing] {what}: {took:.2} s"),
+        }
+        mark = Instant::now();
+    };
     let tts = PiperSynthesizer::start(&cfg);
+    lap("start both Piper voices", None);
 
     // 1. Speak the phrase and join the pieces with short pauses.
     let mut samples: Vec<i16> = Vec::new();
@@ -103,6 +115,7 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
     }
     let seconds = samples.len() as f32 / rate as f32;
     println!("spoken phrase: {seconds:.1} s at {rate} Hz");
+    lap("synthesise 4 pieces", Some(seconds));
 
     // 2. Save it as mp3.
     let mp3 = run_tool(
@@ -115,6 +128,7 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
     let mp3_path = std::env::temp_dir().join("speech-trainer-mixed-ru-en.mp3");
     std::fs::write(&mp3_path, &mp3)?;
     println!("saved {} ({} bytes)", mp3_path.display(), mp3.len());
+    lap("encode mp3", Some(seconds));
 
     // 3. Decode the mp3 back to what the recogniser expects: 16 kHz mono.
     let pcm = run_tool(
@@ -125,11 +139,14 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
     .await?;
     let decoded = wav::pcm16_from_bytes(&pcm);
     assert!((decoded.len() as f32 / 16_000.0 - seconds).abs() < 0.5, "decoded length differs from the spoken one");
+    lap("decode mp3 to 16 kHz", Some(seconds));
 
         // 4. Recognise it.
     let stt = Arc::new(WhisperTranscriber::load(&model_path(), "en")?);
+    lap("load Whisper model", None);
     let heard = crate::backend::Transcriber::transcribe(stt.as_ref(), wav::encode_pcm16_mono(&decoded, 16_000)).await?;
     println!("whisper heard: {heard:?}");
+    lap("recognise", Some(seconds));
     assert!(normalise(&heard).contains("around the clock"), "the English part was not recognised: {heard:?}");
 
     // 5. The same audio as a learner's utterance through a whole server turn.
@@ -157,6 +174,8 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
         }
     }
     assert!(normalise(&transcript).contains("around the clock"), "turn transcript: {transcript:?}");
+    lap("server turn (recognise again + fake tutor + 2 spoken parts)", Some(seconds));
+    println!("[timing] whole test: {:.2} s", t0.elapsed().as_secs_f32());
     assert_eq!(audio_pieces, 2, "expected one Russian and one English audio part");
     assert!(finished, "the turn never finished");
     Ok(())
