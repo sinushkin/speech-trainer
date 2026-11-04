@@ -1,13 +1,13 @@
-//! One test of the whole audio loop, without Claude:
+//! Unit test of the whole audio loop, without Claude and without a real
+//! microphone or speakers:
 //!
-//! text (Russian and English mixed) -> Piper speech -> mp3 file -> playback ->
-//! decode -> Whisper recognition -> a server turn (fake tutor) -> spoken reply -> playback.
+//! text (Russian and English mixed) -> Piper speech -> mp3 file -> decode ->
+//! Whisper recognition -> a server turn (fake tutor) -> spoken reply.
 //!
-//! It needs real models and tools, so it is ignored by default. Run it with
-//! `cargo test -p server --release -- --ignored --nocapture`. Requirements:
-//! the Whisper model (`SPEECH_TRAINER_MODEL`), the Piper binary and the two
-//! voices (see `PiperConfig`), `ffmpeg` with libmp3lame, and `aplay` with a
-//! sound device. Set `SPEECH_TRAINER_NO_PLAYBACK=1` to skip playing sound.
+//! It uses the real Whisper model, the Piper binary with both voices and
+//! `ffmpeg` (libmp3lame). If any of them is missing the test is skipped with a
+//! message; set `SPEECH_TRAINER_REQUIRE_MODELS=1` to make that a failure.
+//! Nothing is played: no sound device is touched.
 
 use crate::backend::{BackendError, Synthesizer, Tutor};
 use crate::markup::Lang;
@@ -47,15 +47,6 @@ async fn run_tool(program: &str, args: &[&str], stdin_data: Option<Vec<u8>>) -> 
     Ok(out.stdout)
 }
 
-/// Plays a WAV file through ALSA and waits until it has finished.
-async fn play(wav_bytes: Vec<u8>) -> TestResult {
-    if std::env::var_os("SPEECH_TRAINER_NO_PLAYBACK").is_some() {
-        return Ok(());
-    }
-    run_tool("aplay", &["-q", "-"], Some(wav_bytes)).await?;
-    Ok(())
-}
-
 fn normalise(text: &str) -> String {
     text.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -74,10 +65,30 @@ fn model_path() -> PathBuf {
     })
 }
 
+/// Returns why the test cannot run here, or `None` when everything is present.
+fn missing_prerequisite(cfg: &PiperConfig) -> Option<String> {
+    let model = model_path();
+    let voice = |name: &str| cfg.voices_dir.join(format!("{name}.onnx"));
+    let checks = [
+        (model.is_file(), format!("Whisper model {}", model.display())),
+        (cfg.bin.is_file(), format!("Piper binary {}", cfg.bin.display())),
+        (voice(&cfg.voice_en).is_file(), format!("voice {}", voice(&cfg.voice_en).display())),
+        (voice(&cfg.voice_ru).is_file(), format!("voice {}", voice(&cfg.voice_ru).display())),
+        (std::process::Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success()), "ffmpeg in PATH".to_string()),
+    ];
+    let missing: Vec<String> = checks.into_iter().filter(|(ok, _)| !ok).map(|(_, what)| what).collect();
+    (!missing.is_empty()).then(|| missing.join(", "))
+}
+
 #[tokio::test]
-#[ignore = "needs the Whisper model, Piper with both voices, ffmpeg and a sound device"]
 async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> TestResult {
-    let tts = PiperSynthesizer::start(&PiperConfig::from_env());
+    let cfg = PiperConfig::from_env();
+    if let Some(missing) = missing_prerequisite(&cfg) {
+        assert!(std::env::var_os("SPEECH_TRAINER_REQUIRE_MODELS").is_none(), "missing: {missing}");
+        eprintln!("SKIPPED audio loop test, missing: {missing}");
+        return Ok(());
+    }
+    let tts = PiperSynthesizer::start(&cfg);
 
     // 1. Speak the phrase and join the pieces with short pauses.
     let mut samples: Vec<i16> = Vec::new();
@@ -115,19 +126,13 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
     let decoded = wav::pcm16_from_bytes(&pcm);
     assert!((decoded.len() as f32 / 16_000.0 - seconds).abs() < 0.5, "decoded length differs from the spoken one");
 
-    // 4. Play the mp3 audio.
-    println!("playing the mp3...");
-    play(wav::encode_pcm16_mono(&decoded, 16_000)).await?;
-
-    // 5. Recognise it.
-    let model = model_path();
-    assert!(model.is_file(), "Whisper model not found at {}", model.display());
-    let stt = Arc::new(WhisperTranscriber::load(&model, "en")?);
+        // 4. Recognise it.
+    let stt = Arc::new(WhisperTranscriber::load(&model_path(), "en")?);
     let heard = crate::backend::Transcriber::transcribe(stt.as_ref(), wav::encode_pcm16_mono(&decoded, 16_000)).await?;
     println!("whisper heard: {heard:?}");
     assert!(normalise(&heard).contains("around the clock"), "the English part was not recognised: {heard:?}");
 
-    // 6. The same audio as a learner's utterance through a whole server turn.
+    // 5. The same audio as a learner's utterance through a whole server turn.
     let tutor = FixedTutor("<say lang=\"ru\">Ты сказал это по-английски. Отлично!</say><say lang=\"en\">Well done. That is how a native speaker says it.</say>");
     let dialog = crate::dialog::parse(include_str!("../tests/fixtures/16_the_job_interview.md"))?;
     let (tx, mut rx) = mpsc::channel(64);
@@ -147,8 +152,6 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
                 let (_, piece) = wav::decode_pcm16_mono(&bytes)?;
                 assert!(piece.iter().any(|s| s.abs() > 500), "the tutor's spoken reply is silent");
                 audio_pieces += 1;
-                println!("playing the tutor's reply, part {audio_pieces}...");
-                play(bytes).await?;
             }
             Out::Msg(_) => {}
         }

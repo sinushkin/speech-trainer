@@ -30,7 +30,7 @@ model for this project; the resident-Claude approach comes from its
 
 Early development; see `docs/ARCHITECTURE.md`. English speech recognition
 (whisper.cpp) and English/Russian speech synthesis (Piper voices) work; the whole
-audio loop is covered by one ignored test, `audio_loop.rs`.
+audio loop (speech, mp3, recognition, a server turn) is covered by one unit test, `audio_loop.rs`.
 
 ## Run
 

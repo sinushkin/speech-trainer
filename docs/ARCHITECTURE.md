@@ -37,7 +37,7 @@ One WebSocket, `GET /ws`.
 | `session` | one turn: utterance, text, tutor, speech and links, back to the client. Generic over `Tutor`, `Transcriber`, `Synthesizer`, so it is tested with in-memory fakes |
 | `stt` | whisper.cpp through `whisper-rs`, English, model loaded once |
 | `tts` | Piper voices: one resident `piper --json-input` process per language (en, ru) |
-| `audio_loop` | the one end-to-end test: mixed ru/en speech, mp3, playback, recognition, a server turn |
+| `audio_loop` | unit test of the whole audio loop: mixed ru/en speech, mp3, recognition, a server turn (no microphone or speakers) |
 | `app` | axum routes and the WebSocket plumbing |
 
 The tutor may only link to videos that appear on a card of the current dialog;
@@ -54,5 +54,5 @@ any other URL in a reply is dropped.
 ## Status
 
 Done: protocol, dialogs, tutor session, English speech recognition, English and Russian
-speech synthesis, WebSocket server, client with VAD, tests with fakes plus one real audio loop test.
+speech synthesis, WebSocket server, client with VAD, tests with fakes plus one real-model audio loop unit test.
 Not done: phone/web client, native (ort) Piper, live microphone verification.
