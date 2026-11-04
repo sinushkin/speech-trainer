@@ -2,13 +2,11 @@
 //! utterances with a voice-activity detector, sends them to the server and
 //! plays back the tutor's audio. The mic is closed while the tutor speaks.
 //!
-//! Usage: `client [dialog-name] [--text]`
-//!   dialog-name  dialog to start with; without it the tutor chooses, and you can ask it to switch
-//!   --text       type your answers instead of speaking (no microphone needed)
-//! Environment: SPEECH_TRAINER_URL (default ws://127.0.0.1:8765/ws),
+//! Usage: see `cli::USAGE` (`client --help`). Environment: SPEECH_TRAINER_URL (default ws://127.0.0.1:8765/ws),
 //!   SPEECH_TRAINER_ARECORD_DEVICE, SPEECH_TRAINER_APLAY_DEVICE.
 
 mod audio;
+mod cli;
 mod vad;
 
 use anyhow::{Context, Result};
@@ -39,9 +37,16 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
         .init();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let text_mode = args.iter().any(|a| a == "--text");
-    let dialog = args.iter().find(|a| !a.starts_with("--")).cloned();
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let args = match cli::parse(&raw, env).map_err(|e| anyhow::anyhow!("{e}\n{}", cli::USAGE))? {
+        cli::Parsed::Help => {
+            println!("{}", cli::USAGE);
+            return Ok(());
+        }
+        cli::Parsed::Run(args) => args,
+    };
+    let text_mode = args.text_mode;
+    let dialog = args.dialog;
     let url = env("SPEECH_TRAINER_URL").unwrap_or_else(|| "ws://127.0.0.1:8765/ws".into());
     let play_device = env("SPEECH_TRAINER_APLAY_DEVICE");
 
@@ -83,10 +88,17 @@ async fn main() -> Result<()> {
         });
     }
 
-    let mut vad = vad::Vad::new(vad::VadConfig::default());
+    let mut vad = vad::Vad::new(vad::VadConfig {
+        trailing_silence_ms: args.pause_ms,
+        max_utterance_ms: args.max_utterance_sec * 1000,
+        ..vad::VadConfig::default()
+    });
     let mut listening = false; // false until the tutor's first turn is done
     if !text_mode {
-        println!("calibrating the microphone, stay quiet for a moment...");
+        println!(
+            "calibrating the microphone, stay quiet for a moment... (an answer ends after {:.1} s of silence; --pause-ms changes that)",
+            f64::from(args.pause_ms) / 1000.0
+        );
     }
 
     loop {

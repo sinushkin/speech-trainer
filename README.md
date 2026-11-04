@@ -41,6 +41,7 @@ export SPEECH_TRAINER_MODEL=~/.cache/speech-trainer/ggml-small.en.bin
 cargo run --release -p server -- --instruction Instruction.md   # listens on 127.0.0.1:8765
 cargo run --release -p client                                   # speak ("another dialog" switches)
 cargo run --release -p client -- --text                         # type
+cargo run --release -p client -- --pause-ms 3000                # wait longer while you think (default 2000)
 ```
 
 Every connection gets its own Claude process (Haiku, read-only tools inside the dialogs

@@ -27,9 +27,9 @@ impl Default for VadConfig {
             sample_rate: protocol::SAMPLE_RATE,
             silence_rms_floor: 120.0,
             noise_factor: 2.5,
-            trailing_silence_ms: 800,
+            trailing_silence_ms: 2000,
             min_utterance_ms: 300,
-            max_utterance_ms: 15_000,
+            max_utterance_ms: 30_000,
             preroll_ms: 240,
             calibration_frames: 10,
         }
@@ -154,6 +154,11 @@ mod tests {
 
     const FRAME: usize = 480; // 30 ms at 16 kHz
 
+    /// The quick settings most tests were written for: 0.8 s pause, 15 s cap.
+    fn short_pause() -> VadConfig {
+        VadConfig { trailing_silence_ms: 800, max_utterance_ms: 15_000, ..VadConfig::default() }
+    }
+
     fn frames(amplitude: i16, ms: usize) -> Vec<Vec<i16>> {
         // Alternating sign keeps rms == |amplitude| for a constant-level signal.
         (0..ms / 30).map(|_| (0..FRAME).map(|i| if i % 2 == 0 { amplitude } else { -amplitude }).collect()).collect()
@@ -171,13 +176,13 @@ mod tests {
 
     #[test]
     fn silence_alone_produces_nothing() {
-        let mut vad = Vad::new(VadConfig::default());
+        let mut vad = Vad::new(short_pause());
         assert!(run(&mut vad, &[frames(20, 3_000)]).is_empty());
     }
 
     #[test]
     fn a_spoken_phrase_is_cut_out_with_preroll() {
-        let mut vad = Vad::new(VadConfig::default());
+        let mut vad = Vad::new(short_pause());
         let out = run(&mut vad, &[frames(20, 600), frames(3_000, 900), frames(20, 1_200)]);
         assert_eq!(out.len(), 1);
         let ms = out[0].len() * 1000 / 16_000;
@@ -187,14 +192,14 @@ mod tests {
 
     #[test]
     fn short_blips_are_ignored() {
-        let mut vad = Vad::new(VadConfig::default());
+        let mut vad = Vad::new(short_pause());
         let out = run(&mut vad, &[frames(20, 600), frames(3_000, 90), frames(20, 1_500)]);
         assert!(out.is_empty());
     }
 
     #[test]
     fn a_stuck_open_mic_is_cut_at_the_maximum_length() {
-        let mut vad = Vad::new(VadConfig::default());
+        let mut vad = Vad::new(short_pause());
         let out = run(&mut vad, &[frames(20, 600), frames(3_000, 16_000)]);
         assert_eq!(out.len(), 1);
         assert!(out[0].len() * 1000 / 16_000 >= 15_000);
@@ -203,13 +208,13 @@ mod tests {
     #[test]
     fn constant_background_noise_is_not_speech() {
         // Noise at rms 150 is louder than the floor of 120 but is the calibrated baseline.
-        let mut vad = Vad::new(VadConfig::default());
+        let mut vad = Vad::new(short_pause());
         assert!(run(&mut vad, &[frames(150, 4_000)]).is_empty());
     }
 
     #[test]
     fn two_phrases_give_two_utterances() {
-        let mut vad = Vad::new(VadConfig::default());
+        let mut vad = Vad::new(short_pause());
         let out = run(&mut vad, &[frames(20, 600), frames(3_000, 600), frames(20, 1_000), frames(3_000, 600), frames(20, 1_000)]);
         assert_eq!(out.len(), 2);
     }
@@ -217,7 +222,7 @@ mod tests {
     #[test]
     fn calibration_survives_a_reset() {
         // After a reset speech must be detected at once, not swallowed by a new calibration.
-        let mut vad = Vad::new(VadConfig::default());
+        let mut vad = Vad::new(short_pause());
         run(&mut vad, &[frames(20, 600)]);
         vad.reset();
         let out = run(&mut vad, &[frames(3_000, 600), frames(20, 1_000)]);
@@ -226,9 +231,25 @@ mod tests {
 
     #[test]
     fn reset_drops_a_partial_utterance() {
-        let mut vad = Vad::new(VadConfig::default());
+        let mut vad = Vad::new(short_pause());
         run(&mut vad, &[frames(20, 600), frames(3_000, 300)]);
         vad.reset();
         assert!(run(&mut vad, &[frames(20, 2_000)]).is_empty());
+    }
+
+    #[test]
+    fn by_default_a_thinking_pause_of_one_and_a_half_seconds_stays_inside_one_answer() {
+        let mut vad = Vad::new(VadConfig::default());
+        let out = run(&mut vad, &[frames(20, 600), frames(3_000, 600), frames(20, 1_500), frames(3_000, 600), frames(20, 2_400)]);
+        assert_eq!(out.len(), 1, "one answer expected, got {}", out.len());
+        let ms = out[0].len() * 1000 / 16_000;
+        assert!(ms > 4_500, "both bursts and the pause must be inside, got {ms} ms");
+    }
+
+    #[test]
+    fn by_default_two_seconds_of_silence_end_the_answer() {
+        let mut vad = Vad::new(VadConfig::default());
+        let out = run(&mut vad, &[frames(20, 600), frames(3_000, 600), frames(20, 2_100)]);
+        assert_eq!(out.len(), 1);
     }
 }
