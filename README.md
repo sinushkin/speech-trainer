@@ -22,12 +22,30 @@ conversation loop: you talk, it listens, Claude answers, you hear the answer.
   a dialogue plus quiz cards (English question, Russian hint, model answer,
   link to the exact moment in the source video).
 
-Related: [LangTeacher](https://github.com/janosdios/langteacher) (Python), whose
-speech pieces this project reuses through pluggable workers.
+Related: [LangTeacher](https://github.com/janosdios/langteacher) (Python) is the
+model for this project; the resident-Claude approach comes from its
+`claude-llama-proxy`. Everything here is Rust, with no Python.
 
 ## Status
 
-Early development. See `docs/ARCHITECTURE.md` for the design and what is done.
+Early development; see `docs/ARCHITECTURE.md`. English speech recognition works
+(whisper.cpp). Speech synthesis is not implemented yet, so replies are text only.
+
+## Run
+
+```
+# one-time: a whisper.cpp model, e.g. ggml-small.en.bin from huggingface.co/ggerganov/whisper.cpp
+export SPEECH_TRAINER_MODEL=~/.cache/speech-trainer/ggml-small.en.bin
+export SPEECH_TRAINER_DIALOGS=/path/to/english-transcripts/dialogs
+cargo run --release -p server                       # listens on 127.0.0.1:8765
+cargo run --release -p client -- 16_the_job_interview          # speak
+cargo run --release -p client -- 16_the_job_interview --text   # type
+```
+
+Settings: `SPEECH_TRAINER_BIND`, `SPEECH_TRAINER_CLAUDE_MODEL` (default `haiku`),
+`SPEECH_TRAINER_CLAUDE_PROXY` (optional HTTP proxy for the claude process),
+`SPEECH_TRAINER_URL` (client), `SPEECH_TRAINER_ARECORD_DEVICE`, `SPEECH_TRAINER_APLAY_DEVICE`.
+Needs the `claude` CLI, `arecord`/`aplay` (alsa-utils), cmake and a C++ compiler to build whisper.cpp.
 
 ## License
 
