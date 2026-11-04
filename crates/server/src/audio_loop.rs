@@ -153,7 +153,8 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
     let tutor = FixedTutor("<say lang=\"ru\">Ты сказал это по-английски. Отлично!</say><say lang=\"en\">Well done. That is how a native speaker says it.</say>");
     let dialog = crate::dialog::parse(include_str!("../tests/fixtures/16_the_job_interview.md"))?;
     let (tx, mut rx) = mpsc::channel(64);
-    let mut session = Session::new(dialog, tutor, stt, Arc::new(tts), tx);
+    let urls = dialog.cards.iter().map(|c| c.url.clone()).collect();
+    let mut session = Session::new(Arc::new(urls), tutor, stt, Arc::new(tts), tx);
     session.on_utterance(&pcm).await.map_err(|_| "session closed")?;
     drop(session);
 

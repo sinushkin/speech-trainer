@@ -9,11 +9,10 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
-/// The tutor must never act as a coding agent while talking to the learner.
-const DISALLOWED_TOOLS: &str = "Bash Edit Write Read Glob Grep WebFetch WebSearch Agent \
-    Skill ScheduleWakeup Monitor CronCreate CronDelete CronList DesignSync \
-    EnterWorktree ExitWorktree ListAgents NotebookEdit PushNotification \
-    RemoteTrigger ReportFindings SendMessage TaskOutput TaskStop ToolSearch";
+/// The tutor may only read: these are the only tools it gets, and with
+/// `dontAsk` anything that would need a permission (for example a path outside
+/// its working directory, the dialogs folder) is refused instead of prompting.
+const TOOLS: &str = "Read,Glob,Grep";
 
 #[derive(Debug, Clone)]
 pub struct ClaudeConfig {
@@ -25,15 +24,43 @@ pub struct ClaudeConfig {
 }
 
 impl ClaudeConfig {
-    pub fn from_env() -> Self {
+    /// `default_model` (from the instruction file) is used unless
+    /// `SPEECH_TRAINER_CLAUDE_MODEL` is set; without either it is Haiku.
+    pub fn from_env(default_model: Option<&str>) -> Self {
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         Self {
             bin: env("SPEECH_TRAINER_CLAUDE_BIN").unwrap_or_else(|| "claude".into()),
-            model: env("SPEECH_TRAINER_CLAUDE_MODEL").unwrap_or_else(|| "haiku".into()),
+            model: env("SPEECH_TRAINER_CLAUDE_MODEL")
+                .or_else(|| default_model.map(str::to_string))
+                .unwrap_or_else(|| "haiku".into()),
             proxy: env("SPEECH_TRAINER_CLAUDE_PROXY"),
             turn_timeout: Duration::from_secs(120),
         }
     }
+}
+
+/// Command line arguments of the resident process.
+pub fn build_args(cfg: &ClaudeConfig, system_prompt: &str) -> Vec<String> {
+    [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--tools",
+        TOOLS,
+        "--permission-mode",
+        "dontAsk",
+        "--model",
+        &cfg.model,
+        "--system-prompt",
+        system_prompt,
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect()
 }
 
 pub struct ClaudeSession {
@@ -69,24 +96,10 @@ pub fn user_line(text: &str) -> String {
 }
 
 impl ClaudeSession {
-    pub fn spawn(cfg: &ClaudeConfig, system_prompt: &str) -> Result<Self, BackendError> {
+    /// Starts a Claude process whose working directory is `cwd` (the dialogs folder).
+    pub fn spawn(cfg: &ClaudeConfig, system_prompt: &str, cwd: &std::path::Path) -> Result<Self, BackendError> {
         let mut cmd = Command::new(&cfg.bin);
-        cmd.args([
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--dangerously-skip-permissions",
-            "--no-session-persistence",
-            "--model",
-            &cfg.model,
-            "--disallowedTools",
-            DISALLOWED_TOOLS,
-            "--system-prompt",
-            system_prompt,
-        ]);
+        cmd.args(build_args(cfg, system_prompt)).current_dir(cwd);
         if let Some(proxy) = &cfg.proxy {
             cmd.env("HTTP_PROXY", proxy).env("HTTPS_PROXY", proxy);
         }
@@ -138,6 +151,18 @@ mod tests {
         );
         assert_eq!(parse_event(r#"{"type":"assistant","message":{}}"#), Event::Other);
         assert_eq!(parse_event("not json"), Event::Other);
+    }
+
+    #[test]
+    fn the_tutor_gets_read_only_tools_and_no_permission_bypass() {
+        let cfg = ClaudeConfig { bin: "claude".into(), model: "haiku".into(), proxy: None, turn_timeout: Duration::from_secs(1) };
+        let args = build_args(&cfg, "PROMPT");
+        let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+        assert_eq!(after("--tools").as_deref(), Some("Read,Glob,Grep"));
+        assert_eq!(after("--permission-mode").as_deref(), Some("dontAsk"));
+        assert_eq!(after("--model").as_deref(), Some("haiku"));
+        assert_eq!(after("--system-prompt").as_deref(), Some("PROMPT"));
+        assert!(!args.iter().any(|a| a.contains("dangerously")), "permissions must not be bypassed");
     }
 
     #[test]

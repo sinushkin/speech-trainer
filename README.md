@@ -37,13 +37,14 @@ audio loop (speech, mp3, recognition, a server turn) is covered by one unit test
 ```
 # one-time: the Piper binary and voices in ~/.cache/speech-trainer (see CLAUDE.md), and a whisper.cpp model, e.g. ggml-small.en.bin from huggingface.co/ggerganov/whisper.cpp
 export SPEECH_TRAINER_MODEL=~/.cache/speech-trainer/ggml-small.en.bin
-export SPEECH_TRAINER_DIALOGS=/path/to/english-transcripts/dialogs
-cargo run --release -p server                       # listens on 127.0.0.1:8765
-cargo run --release -p client -- 16_the_job_interview          # speak
-cargo run --release -p client -- 16_the_job_interview --text   # type
+# edit Instruction.md: dialogs_dir, what to learn, session timeout
+cargo run --release -p server -- --instruction Instruction.md   # listens on 127.0.0.1:8765
+cargo run --release -p client                                   # speak ("another dialog" switches)
+cargo run --release -p client -- --text                         # type
 ```
 
-Settings: `SPEECH_TRAINER_BIND`, `SPEECH_TRAINER_CLAUDE_MODEL` (default `haiku`),
+Every connection gets its own Claude process (Haiku, read-only tools inside the dialogs
+folder) that is stopped after the idle timeout (30 minutes). Settings: `SPEECH_TRAINER_BIND`, `SPEECH_TRAINER_CLAUDE_MODEL` (overrides `model` in `Instruction.md`),
 `SPEECH_TRAINER_CLAUDE_PROXY` (optional HTTP proxy for the claude process),
 `SPEECH_TRAINER_URL` (client), `SPEECH_TRAINER_ARECORD_DEVICE`, `SPEECH_TRAINER_APLAY_DEVICE`.
 Needs the `claude` CLI, `arecord`/`aplay` (alsa-utils), cmake and a C++ compiler to build whisper.cpp.

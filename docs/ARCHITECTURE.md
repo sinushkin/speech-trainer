@@ -15,10 +15,10 @@ aplay ◀── WAV ◀── WebSocket binary ◀── TTS ◀── tagged re
 
 One WebSocket, `GET /ws`.
 
-* Client text frames: `{"type":"hello","dialog":"16_the_job_interview"}` (first message),
+* Client text frames: `{"type":"hello"}` (first message; optional `"dialog":"16_the_job_interview"` names the dialog to start with),
   `{"type":"text","text":"..."}` (typed input, bypasses recognition).
 * Client binary frames: one whole utterance, PCM16 little endian, mono, 16 kHz.
-* Server text frames: `ready`, `transcript`, `reply`, `link`, `turn_done`, `error`.
+* Server text frames: `ready`, `transcript`, `reply`, `link`, `turn_done`, `error`, `session_ended` (idle timeout; the Claude process was stopped and the connection closes).
 * Server binary frames: one complete WAV file per spoken segment.
 * `turn_done` means the tutor finished and the microphone may open again. The
   client is half duplex: it ignores the microphone until `turn_done`, so the
@@ -30,17 +30,18 @@ One WebSocket, `GET /ws`.
 
 | module | job |
 |---|---|
-| `dialog` | parses the `english-transcripts/dialogs` Markdown (dialogue + quiz cards); dialog names from the network are restricted to `[A-Za-z0-9_-]` |
-| `prompt` | builds the tutor's system prompt from a dialog |
-| `claude` | one resident `claude -p --input-format stream-json` process per session; context lives in the process (same approach as LangTeacher's `claude-llama-proxy`) |
+| `instruction` | parses `Instruction.md`: a `---` header (`dialogs_dir`, `model`, `session_timeout_minutes`, `max_sessions`) and the free text on what is learned and how |
+| `dialog`, `library` | parse the dialog Markdown; the library scans the folder at start: a catalogue for the prompt and the set of all card video links |
+| `prompt` | the tutor's system prompt: rules and reply format, the instruction text, the catalogue |
+| `claude` | one resident `claude -p --input-format stream-json` process per session, working directory = the dialogs folder, tools limited to `Read,Glob,Grep`, `dontAsk` permission mode. The tutor itself finds and switches dialogs when the learner asks |
 | `markup` | parses the tutor's reply: `<say lang="en|ru">`, `<link url="...">` |
-| `session` | one turn: utterance, text, tutor, speech and links, back to the client. Generic over `Tutor`, `Transcriber`, `Synthesizer`, so it is tested with in-memory fakes |
+| `session` | one turn: utterance, text, tutor, speech and links, back to the client; `drive` serves a connection and ends it after the idle timeout. Generic over `Tutor`, `Transcriber`, `Synthesizer`, so it is tested with in-memory fakes |
 | `stt` | whisper.cpp through `whisper-rs`, English, model loaded once |
 | `tts` | Piper voices: one resident `piper --json-input` process per language (en, ru) |
 | `audio_loop` | unit test of the whole audio loop: mixed ru/en speech, mp3, recognition, a server turn (no microphone or speakers) |
-| `app` | axum routes and the WebSocket plumbing |
+| `app` | axum routes; per connection a semaphore slot (`max_sessions`), a new Claude process and `Session::drive` with the idle timeout |
 
-The tutor may only link to videos that appear on a card of the current dialog;
+The tutor may only link to videos that appear on some card in the dialogs folder;
 any other URL in a reply is dropped.
 
 ## Client (`crates/client`)

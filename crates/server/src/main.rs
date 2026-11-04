@@ -4,6 +4,8 @@ mod audio_loop;
 mod backend;
 mod claude;
 mod dialog;
+mod instruction;
+mod library;
 mod markup;
 mod prompt;
 mod session;
@@ -14,8 +16,33 @@ use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+const USAGE: &str = "usage: server --instruction <Instruction.md>\n\
+    The instruction file says where the dialogs are, what is learned and how long sessions live;\n\
+    see Instruction.md in the repository root. SPEECH_TRAINER_INSTRUCTION can replace the argument.\n\
+    Other settings (environment): SPEECH_TRAINER_BIND, SPEECH_TRAINER_MODEL, SPEECH_TRAINER_PIPER,\n\
+    SPEECH_TRAINER_VOICES, SPEECH_TRAINER_CLAUDE_BIN, SPEECH_TRAINER_CLAUDE_MODEL, SPEECH_TRAINER_CLAUDE_PROXY";
+
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+fn instruction_path() -> Result<PathBuf> {
+    let mut args = std::env::args().skip(1);
+    let mut path = env("SPEECH_TRAINER_INSTRUCTION");
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--instruction" => path = Some(args.next().context("--instruction needs a file path")?),
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            other => match other.strip_prefix("--instruction=") {
+                Some(p) => path = Some(p.to_string()),
+                None => bail!("unknown argument {other:?}\n{USAGE}"),
+            },
+        }
+    }
+    path.map(PathBuf::from).with_context(|| format!("no instruction file given\n{USAGE}"))
 }
 
 #[tokio::main]
@@ -23,6 +50,17 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    let path = instruction_path()?;
+    let instruction = instruction::load(&path).with_context(|| format!("bad instruction file {}", path.display()))?;
+    if !instruction.dialogs_dir.is_dir() {
+        bail!("dialogs_dir {} (from {}) does not exist", instruction.dialogs_dir.display(), path.display());
+    }
+
+    let library = library::Library::scan(&instruction.dialogs_dir).context("cannot read the dialogs folder")?;
+    if library.entries.is_empty() {
+        bail!("no dialogs found in {}", instruction.dialogs_dir.display());
+    }
 
     let model = PathBuf::from(env("SPEECH_TRAINER_MODEL").unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_default();
@@ -32,17 +70,23 @@ async fn main() -> Result<()> {
         bail!("whisper model {} not found; download a ggml model (ggml-small.en.bin from ggerganov/whisper.cpp on Hugging Face) or set SPEECH_TRAINER_MODEL", model.display());
     }
     let bind = env("SPEECH_TRAINER_BIND").unwrap_or_else(|| "127.0.0.1:8765".into());
-    let dialogs_dir = PathBuf::from(env("SPEECH_TRAINER_DIALOGS").unwrap_or_else(|| "dialogs".into()));
-    if !dialogs_dir.is_dir() {
-        bail!("dialogs directory {} does not exist (set SPEECH_TRAINER_DIALOGS)", dialogs_dir.display());
-    }
 
-    let state = Arc::new(app::AppState {
-        dialogs_dir,
-        claude: claude::ClaudeConfig::from_env(),
-        stt: Arc::new(stt::WhisperTranscriber::load(&model, "en").context("cannot load the speech recognition model")?),
-        tts: Arc::new(tts::PiperSynthesizer::start(&tts::PiperConfig::from_env())),
-    });
+    let claude = claude::ClaudeConfig::from_env(instruction.model.as_deref());
+    tracing::info!(
+        "dialogs: {} ({} files), claude model: {}, session timeout: {} min, max sessions: {}",
+        instruction.dialogs_dir.display(),
+        library.entries.len(),
+        claude.model,
+        instruction.session_timeout.as_secs() / 60,
+        instruction.max_sessions
+    );
+    let state = Arc::new(app::AppState::new(
+        instruction,
+        library,
+        claude,
+        Arc::new(stt::WhisperTranscriber::load(&model, "en").context("cannot load the speech recognition model")?),
+        Arc::new(tts::PiperSynthesizer::start(&tts::PiperConfig::from_env())),
+    ));
 
     let listener = tokio::net::TcpListener::bind(&bind).await.with_context(|| format!("cannot bind {bind}"))?;
     tracing::info!("speech-trainer server listening on {bind}");

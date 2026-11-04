@@ -2,15 +2,16 @@
 //! utterances with a voice-activity detector, sends them to the server and
 //! plays back the tutor's audio. The mic is closed while the tutor speaks.
 //!
-//! Usage: `client <dialog-name> [--text]`
-//!   --text   type your answers instead of speaking (no microphone needed)
+//! Usage: `client [dialog-name] [--text]`
+//!   dialog-name  dialog to start with; without it the tutor chooses, and you can ask it to switch
+//!   --text       type your answers instead of speaking (no microphone needed)
 //! Environment: SPEECH_TRAINER_URL (default ws://127.0.0.1:8765/ws),
 //!   SPEECH_TRAINER_ARECORD_DEVICE, SPEECH_TRAINER_APLAY_DEVICE.
 
 mod audio;
 mod vad;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ClientMsg, ServerMsg, wav};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -22,12 +23,13 @@ fn env(key: &str) -> Option<String> {
 
 fn show(msg: &ServerMsg) {
     match msg {
-        ServerMsg::Ready { title, cards } => println!("== {title} ({cards} cards)"),
+        ServerMsg::Ready { dialogs } => println!("== session started ({dialogs} dialogs available; say \"another dialog\" to switch)"),
         ServerMsg::Transcript { text } => println!("you:   {text}"),
         ServerMsg::Reply { text } => println!("tutor: {text}"),
         ServerMsg::Link { url, label } => println!("watch: {label}  {url}"),
         ServerMsg::TurnDone => {}
         ServerMsg::Error { message } => eprintln!("error: {message}"),
+        ServerMsg::SessionEnded { reason } => println!("== session ended: {reason}"),
     }
 }
 
@@ -39,15 +41,13 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let text_mode = args.iter().any(|a| a == "--text");
-    let Some(dialog) = args.iter().find(|a| !a.starts_with("--")) else {
-        bail!("usage: client <dialog-name> [--text]   (e.g. client 16_the_job_interview)");
-    };
+    let dialog = args.iter().find(|a| !a.starts_with("--")).cloned();
     let url = env("SPEECH_TRAINER_URL").unwrap_or_else(|| "ws://127.0.0.1:8765/ws".into());
     let play_device = env("SPEECH_TRAINER_APLAY_DEVICE");
 
     let (ws, _) = tokio_tungstenite::connect_async(&url).await.with_context(|| format!("cannot connect to {url}"))?;
     let (mut sink, mut stream) = ws.split();
-    let hello = serde_json::to_string(&ClientMsg::Hello { dialog: dialog.clone() })?;
+    let hello = serde_json::to_string(&ClientMsg::Hello { dialog })?;
     sink.send(Message::Text(hello.into())).await?;
 
     // Frames from the microphone (or typed lines in --text mode) arrive here.
@@ -97,6 +97,9 @@ async fn main() -> Result<()> {
                     Message::Text(t) => match serde_json::from_str::<ServerMsg>(&t) {
                         Ok(msg) => {
                             show(&msg);
+                            if matches!(msg, ServerMsg::SessionEnded { .. }) {
+                                break;
+                            }
                             if matches!(msg, ServerMsg::TurnDone) {
                                 while mic_rx.try_recv().is_ok() {} // stale audio from while the tutor spoke
                                 vad.reset();

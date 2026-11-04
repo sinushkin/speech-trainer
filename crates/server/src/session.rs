@@ -2,11 +2,12 @@
 //! tutor's tagged reply into text, links and audio for the client.
 
 use crate::backend::{Synthesizer, Transcriber, Tutor};
-use crate::dialog::Dialog;
 use crate::markup::{self, Segment};
 use protocol::{SAMPLE_RATE, ServerMsg, wav};
 use std::collections::HashSet;
+use futures_util::{Stream, StreamExt};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// What the session sends towards the client connection.
@@ -24,9 +25,31 @@ pub struct Closed;
 /// Utterances shorter than this are treated as noise and ignored.
 const MIN_UTTERANCE_SAMPLES: usize = (SAMPLE_RATE as usize) * 3 / 10;
 
+/// What arrives from the client connection, already decoded.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Incoming {
+    Utterance(Vec<u8>),
+    Text(String),
+    /// A frame that needs no action.
+    Ignore,
+    /// A frame the server cannot understand; ends the session.
+    Invalid(String),
+    Close,
+}
+
+/// Why a session ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum End {
+    Closed,
+    /// No activity from the client for the idle timeout.
+    Expired,
+    ClientGone,
+    Invalid(String),
+}
+
 pub struct Session<T, S, V> {
-    dialog: Dialog,
-    allowed_urls: HashSet<String>,
+    /// Video links that exist on some card; any other link in a reply is dropped.
+    allowed_urls: Arc<HashSet<String>>,
     tutor: T,
     stt: Arc<S>,
     tts: Arc<V>,
@@ -34,9 +57,8 @@ pub struct Session<T, S, V> {
 }
 
 impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
-    pub fn new(dialog: Dialog, tutor: T, stt: Arc<S>, tts: Arc<V>, out: mpsc::Sender<Out>) -> Self {
-        let allowed_urls = dialog.cards.iter().map(|c| c.url.clone()).collect();
-        Self { dialog, allowed_urls, tutor, stt, tts, out }
+    pub fn new(allowed_urls: Arc<HashSet<String>>, tutor: T, stt: Arc<S>, tts: Arc<V>, out: mpsc::Sender<Out>) -> Self {
+        Self { allowed_urls, tutor, stt, tts, out }
     }
 
     async fn emit(&self, o: Out) -> Result<(), Closed> {
@@ -47,10 +69,35 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         self.emit(Out::Msg(m)).await
     }
 
-    /// Announces the dialog and lets the tutor open the lesson.
-    pub async fn begin(&mut self) -> Result<(), Closed> {
-        self.msg(ServerMsg::Ready { title: self.dialog.title.clone(), cards: self.dialog.cards.len() }).await?;
-        self.run_turn("Begin the lesson.").await
+    /// Serves the client until the connection closes, a frame is invalid, or the
+    /// client stays silent for `idle` (the session has expired). The idle timer
+    /// restarts after every frame and does not run while the tutor is working.
+    pub async fn drive<St>(&mut self, incoming: &mut St, idle: Duration) -> End
+    where
+        St: Stream<Item = Incoming> + Unpin,
+    {
+        loop {
+            let next = match tokio::time::timeout(idle, incoming.next()).await {
+                Ok(next) => next,
+                Err(_) => return End::Expired,
+            };
+            let served = match next {
+                None | Some(Incoming::Close) => return End::Closed,
+                Some(Incoming::Invalid(why)) => return End::Invalid(why),
+                Some(Incoming::Ignore) => Ok(()),
+                Some(Incoming::Utterance(pcm)) => self.on_utterance(&pcm).await,
+                Some(Incoming::Text(text)) => self.on_text(&text).await,
+            };
+            if served.is_err() {
+                return End::ClientGone;
+            }
+        }
+    }
+
+    /// Announces the session and lets the tutor open the lesson with `first_message`.
+    pub async fn begin(&mut self, first_message: &str, dialogs: usize) -> Result<(), Closed> {
+        self.msg(ServerMsg::Ready { dialogs }).await?;
+        self.run_turn(first_message).await
     }
 
     /// `pcm` is one utterance: PCM16 little endian, mono, 16 kHz.
@@ -161,10 +208,11 @@ mod tests {
     fn rig(replies: Vec<Result<String, String>>, stt_text: &'static str) -> Result<Rig, crate::dialog::DialogError> {
         let dialog = parse(FIXTURE)?;
         let url = dialog.cards[0].url.clone();
+        let urls: HashSet<String> = dialog.cards.iter().map(|c| c.url.clone()).collect();
         let (tx, rx) = mpsc::channel(64);
         let heard = Arc::new(Mutex::new(Vec::new()));
         let tutor = FakeTutor { replies, heard: heard.clone() };
-        let session = Session::new(dialog, tutor, Arc::new(FakeStt(stt_text)), Arc::new(FakeTts), tx);
+        let session = Session::new(Arc::new(urls), tutor, Arc::new(FakeStt(stt_text)), Arc::new(FakeTts), tx);
         Ok(Rig { session, rx, heard, url })
     }
 
@@ -186,6 +234,7 @@ mod tests {
                 Out::Msg(ServerMsg::Link { .. }) => "link",
                 Out::Msg(ServerMsg::TurnDone) => "done",
                 Out::Msg(ServerMsg::Error { .. }) => "error",
+                Out::Msg(ServerMsg::SessionEnded { .. }) => "ended",
             })
             .collect()
     }
@@ -194,7 +243,7 @@ mod tests {
     async fn the_lesson_opens_with_ready_reply_audio_and_done() -> Result<(), Box<dyn std::error::Error>> {
         let reply = "<say lang=\"en\">Hi! Question one.</say><say lang=\"ru\">Скажи про работу.</say>".to_string();
         let mut r = rig(vec![Ok(reply)], "")?;
-        r.session.begin().await.map_err(|_| "closed")?;
+        r.session.begin("Begin the lesson.", 1).await.map_err(|_| "closed")?;
         let outs = drain(&mut r.rx);
         assert_eq!(kinds(&outs), vec!["ready", "reply", "audio", "audio", "done"]);
         assert_eq!(outs[1], Out::Msg(ServerMsg::Reply { text: "Hi! Question one. Скажи про работу.".into() }));
@@ -257,6 +306,72 @@ mod tests {
         let mut r = rig(vec![Ok("hello".into())], "")?;
         drop(r.rx);
         assert!(r.session.on_text("x").await.is_err());
+        Ok(())
+    }
+
+    fn incoming_stream(rx: mpsc::Receiver<Incoming>) -> std::pin::Pin<Box<dyn Stream<Item = Incoming> + Send>> {
+        Box::pin(futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|v| (v, rx)) }))
+    }
+
+    const IDLE: Duration = Duration::from_secs(30 * 60);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_client_expires_after_the_idle_timeout_and_activity_resets_it() -> Result<(), Box<dyn std::error::Error>> {
+        let replies = vec![Ok("<say lang=\"en\">one</say>".to_string()), Ok("<say lang=\"en\">two</say>".to_string())];
+        let r = rig(replies, "")?;
+        let (itx, irx) = mpsc::channel(8);
+        let mut stream = incoming_stream(irx);
+        let mut session = r.session;
+        let handle = tokio::spawn(async move {
+            let end = session.drive(&mut stream, IDLE).await;
+            (end, session)
+        });
+
+        tokio::time::advance(Duration::from_secs(29 * 60)).await;
+        tokio::task::yield_now().await;
+        assert!(!handle.is_finished(), "must still be alive after 29 minutes of silence");
+
+        itx.send(Incoming::Text("hello".into())).await?; // activity restarts the timer
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(29 * 60)).await;
+        tokio::task::yield_now().await;
+        assert!(!handle.is_finished(), "activity must restart the idle timer");
+
+        tokio::time::advance(Duration::from_secs(2 * 60)).await;
+        let (end, _session) = handle.await?;
+        assert_eq!(end, End::Expired);
+        assert_eq!(r.heard.lock().map_err(|_| "poisoned")?.as_slice(), ["hello"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drive_ends_when_the_client_closes_or_sends_garbage() -> Result<(), Box<dyn std::error::Error>> {
+        for (frame, expected) in [
+            (Incoming::Close, End::Closed),
+            (Incoming::Invalid("bad".into()), End::Invalid("bad".into())),
+        ] {
+            let mut r = rig(vec![], "")?;
+            let (itx, irx) = mpsc::channel(8);
+            itx.send(frame).await?;
+            let mut stream = incoming_stream(irx);
+            assert_eq!(r.session.drive(&mut stream, IDLE).await, expected);
+        }
+        let mut r = rig(vec![], "")?;
+        let (itx, irx) = mpsc::channel::<Incoming>(8);
+        drop(itx);
+        let mut stream = incoming_stream(irx);
+        assert_eq!(r.session.drive(&mut stream, IDLE).await, End::Closed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drive_stops_when_the_output_side_is_gone() -> Result<(), Box<dyn std::error::Error>> {
+        let mut r = rig(vec![Ok("hi".into())], "")?;
+        drop(r.rx);
+        let (itx, irx) = mpsc::channel(8);
+        itx.send(Incoming::Text("x".into())).await?;
+        let mut stream = incoming_stream(irx);
+        assert_eq!(r.session.drive(&mut stream, IDLE).await, End::ClientGone);
         Ok(())
     }
 }

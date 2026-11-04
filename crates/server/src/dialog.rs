@@ -1,7 +1,5 @@
-//! Loads prepared dialogs written in the `english-transcripts/dialogs` Markdown
+//! Parses prepared dialogs written in the `english-transcripts/dialogs` Markdown
 //! format: a dialogue plus quiz cards (question, hint, model answer, video link).
-
-use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
@@ -23,40 +21,10 @@ pub struct Dialog {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DialogError {
-    #[error("invalid dialog name {0:?}: only letters, digits, '_' and '-' are allowed")]
-    BadName(String),
-    #[error("cannot read dialog {name}: {source}")]
-    Io { name: String, source: std::io::Error },
     #[error("dialog has no title line (`# Dialog NN: Title`)")]
     NoTitle,
     #[error("dialog has no cards")]
     NoCards,
-}
-
-/// Loads `<dir>/<name>.md`. `name` comes from the network, so it is restricted
-/// to a safe character set before it touches the file system.
-pub fn load(dir: &Path, name: &str) -> Result<Dialog, DialogError> {
-    let valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    if !valid {
-        return Err(DialogError::BadName(name.to_string()));
-    }
-    let text = std::fs::read_to_string(dir.join(format!("{name}.md")))
-        .map_err(|source| DialogError::Io { name: name.to_string(), source })?;
-    parse(&text)
-}
-
-/// Names of the dialogs available in `dir`, sorted.
-pub fn list(dir: &Path) -> std::io::Result<Vec<String>> {
-    let mut names = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("md")
-            && let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                names.push(stem.to_string());
-            }
-    }
-    names.sort();
-    Ok(names)
 }
 
 fn field<'a>(line: &'a str, label: &str) -> Option<&'a str> {
@@ -144,13 +112,6 @@ mod tests {
             assert!(c.link_label.contains(" @ "), "{}", c.link_label);
         }
         Ok(())
-    }
-
-    #[test]
-    fn rejects_unsafe_names_before_touching_the_disk() {
-        for bad in ["", "../etc/passwd", "a/b", "x.md", "a b"] {
-            assert!(matches!(load(Path::new("."), bad), Err(DialogError::BadName(_))), "{bad}");
-        }
     }
 
     #[test]
