@@ -22,6 +22,10 @@ pub enum ClientMsg {
     Hello {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dialog: Option<String>,
+        /// Start in video mode: the tutor picks a random video, sends a link to
+        /// it, and drills the phrases of that video after the learner has watched it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        video: bool,
     },
     /// Typed input that bypasses speech recognition (development and tests).
     Text { text: String },
@@ -42,6 +46,10 @@ pub enum ServerMsg {
     Reply { text: String },
     /// A link to the source video moment, shown after feedback.
     Link { url: String, label: String },
+    /// The learner is sent to watch a whole video on YouTube. The microphone
+    /// stays closed (the video would be recorded) until the learner says they
+    /// are ready; the client waits for the Enter key and then sends text.
+    Watch { url: String, label: String },
     /// Sent just before `turn_done` when the tutor will go on by itself: if the
     /// learner has not started speaking `after_ms` after the audio finished,
     /// the client sends [`ClientMsg::Continue`].
@@ -60,7 +68,7 @@ mod tests {
 
     #[test]
     fn client_messages_round_trip_as_tagged_json() -> Result<(), serde_json::Error> {
-        let msg = ClientMsg::Hello { dialog: Some("16_the_job_interview".into()) };
+        let msg = ClientMsg::Hello { dialog: Some("16_the_job_interview".into()), video: false };
         let json = serde_json::to_string(&msg)?;
         assert_eq!(json, r#"{"type":"hello","dialog":"16_the_job_interview"}"#);
         assert_eq!(serde_json::from_str::<ClientMsg>(&json)?, msg);
@@ -76,8 +84,11 @@ mod tests {
 
     #[test]
     fn hello_without_a_dialog_is_valid() -> Result<(), serde_json::Error> {
-        assert_eq!(serde_json::from_str::<ClientMsg>(r#"{"type":"hello"}"#)?, ClientMsg::Hello { dialog: None });
-        assert_eq!(serde_json::to_string(&ClientMsg::Hello { dialog: None })?, r#"{"type":"hello"}"#);
+        assert_eq!(serde_json::from_str::<ClientMsg>(r#"{"type":"hello"}"#)?, ClientMsg::Hello { dialog: None, video: false });
+        assert_eq!(serde_json::to_string(&ClientMsg::Hello { dialog: None, video: false })?, r#"{"type":"hello"}"#);
+        let video = ClientMsg::Hello { dialog: None, video: true };
+        assert_eq!(serde_json::to_string(&video)?, r#"{"type":"hello","video":true}"#);
+        assert_eq!(serde_json::from_str::<ClientMsg>(r#"{"type":"hello","video":true}"#)?, video);
         Ok(())
     }
 
@@ -88,6 +99,7 @@ mod tests {
             ServerMsg::Transcript { text: "hello".into() },
             ServerMsg::Link { url: "https://youtu.be/x?t=1".into(), label: "x @ 0:01".into() },
             ServerMsg::ContinueIfSilent { after_ms: 3000 },
+            ServerMsg::Watch { url: "https://www.youtube.com/watch?v=x".into(), label: "Title".into() },
             ServerMsg::TurnDone,
             ServerMsg::Error { message: "boom".into() },
             ServerMsg::SessionEnded { reason: "idle".into() },

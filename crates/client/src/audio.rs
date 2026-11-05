@@ -40,6 +40,23 @@ impl Mic {
     }
 }
 
+/// A short "pik": the signal that the microphone is open and you may speak.
+/// 880 Hz, 140 ms, with 10 ms fades at both ends so it does not click.
+pub fn beep_wav() -> Vec<u8> {
+    const RATE: u32 = 16_000;
+    const FREQ: f32 = 880.0;
+    let n = RATE as usize * 140 / 1000;
+    let fade = RATE as usize * 10 / 1000;
+    let samples: Vec<i16> = (0..n)
+        .map(|i| {
+            let gain = (i.min(n - 1 - i) as f32 / fade as f32).min(1.0);
+            let wave = (2.0 * std::f32::consts::PI * FREQ * i as f32 / RATE as f32).sin();
+            (wave * gain * 0.35 * f32::from(i16::MAX)) as i16
+        })
+        .collect();
+    protocol::wav::encode_pcm16_mono(&samples, RATE)
+}
+
 /// Plays one complete WAV file and waits until it finished.
 pub async fn play_wav(wav: &[u8], device: Option<&str>) -> Result<()> {
     let mut cmd = Command::new("aplay");
@@ -58,4 +75,23 @@ pub async fn play_wav(wav: &[u8], device: Option<&str>) -> Result<()> {
         return Err(anyhow!("aplay exited with {status}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_beep_is_a_short_audible_880_hz_tone_without_clicks() -> Result<(), protocol::wav::WavError> {
+        let (rate, samples) = protocol::wav::decode_pcm16_mono(&beep_wav())?;
+        assert_eq!(rate, 16_000);
+        assert_eq!(samples.len(), 2_240, "140 ms");
+        let peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        assert!((8_000..16_000).contains(&peak), "audible but not loud, peak {peak}");
+        assert!(samples[0].abs() < 300 && samples[samples.len() - 1].abs() < 300, "fades in and out");
+        let crossings = samples.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
+        // 880 Hz for 0.14 s is 123 periods, so about 246 sign changes.
+        assert!((235..=255).contains(&crossings), "pitch off, {crossings} zero crossings");
+        Ok(())
+    }
 }

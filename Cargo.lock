@@ -778,6 +778,7 @@ dependencies = [
  "axum",
  "futures-util",
  "protocol",
+ "rand",
  "serde",
  "serde_json",
  "thiserror",

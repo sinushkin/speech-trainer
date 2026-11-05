@@ -11,6 +11,7 @@ mod prompt;
 mod session;
 mod stt;
 mod tts;
+mod videos;
 
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
@@ -62,6 +63,20 @@ async fn main() -> Result<()> {
         bail!("no dialogs found in {}", instruction.dialogs_dir.display());
     }
 
+    let videos = match &instruction.videos_dir {
+        Some(dir) => {
+            let lib = videos::VideoLibrary::scan(dir).with_context(|| format!("cannot read videos_dir {}", dir.display()))?;
+            if lib.videos.is_empty() {
+                tracing::warn!("no usable video transcripts in {}: video mode is off", dir.display());
+                None
+            } else {
+                tracing::info!("video mode: {} videos from {}", lib.videos.len(), dir.display());
+                Some(lib)
+            }
+        }
+        None => None,
+    };
+
     let model = PathBuf::from(env("SPEECH_TRAINER_MODEL").unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_default();
         format!("{home}/.cache/speech-trainer/ggml-small.en.bin")
@@ -83,6 +98,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(app::AppState::new(
         instruction,
         library,
+        videos,
         claude,
         Arc::new(stt::WhisperTranscriber::load(&model, "en").context("cannot load the speech recognition model")?),
         Arc::new(tts::PiperSynthesizer::start(&tts::PiperConfig::from_env())),

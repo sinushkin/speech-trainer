@@ -40,8 +40,10 @@ impl ClaudeConfig {
 }
 
 /// Command line arguments of the resident process.
-pub fn build_args(cfg: &ClaudeConfig, system_prompt: &str) -> Vec<String> {
-    [
+/// `extra_dirs` are folders besides the working directory that the read-only
+/// tools may look into (the video transcripts).
+pub fn build_args(cfg: &ClaudeConfig, system_prompt: &str, extra_dirs: &[std::path::PathBuf]) -> Vec<String> {
+    let mut args: Vec<String> = [
         "-p",
         "--input-format",
         "stream-json",
@@ -60,7 +62,12 @@ pub fn build_args(cfg: &ClaudeConfig, system_prompt: &str) -> Vec<String> {
     ]
     .iter()
     .map(|a| a.to_string())
-    .collect()
+    .collect();
+    for dir in extra_dirs {
+        args.push("--add-dir".to_string());
+        args.push(dir.display().to_string());
+    }
+    args
 }
 
 pub struct ClaudeSession {
@@ -97,9 +104,14 @@ pub fn user_line(text: &str) -> String {
 
 impl ClaudeSession {
     /// Starts a Claude process whose working directory is `cwd` (the dialogs folder).
-    pub fn spawn(cfg: &ClaudeConfig, system_prompt: &str, cwd: &std::path::Path) -> Result<Self, BackendError> {
+    pub fn spawn(
+        cfg: &ClaudeConfig,
+        system_prompt: &str,
+        cwd: &std::path::Path,
+        extra_dirs: &[std::path::PathBuf],
+    ) -> Result<Self, BackendError> {
         let mut cmd = Command::new(&cfg.bin);
-        cmd.args(build_args(cfg, system_prompt)).current_dir(cwd);
+        cmd.args(build_args(cfg, system_prompt, extra_dirs)).current_dir(cwd);
         if let Some(proxy) = &cfg.proxy {
             cmd.env("HTTP_PROXY", proxy).env("HTTPS_PROXY", proxy);
         }
@@ -156,13 +168,18 @@ mod tests {
     #[test]
     fn the_tutor_gets_read_only_tools_and_no_permission_bypass() {
         let cfg = ClaudeConfig { bin: "claude".into(), model: "haiku".into(), proxy: None, turn_timeout: Duration::from_secs(1) };
-        let args = build_args(&cfg, "PROMPT");
+        let args = build_args(&cfg, "PROMPT", &[]);
         let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
         assert_eq!(after("--tools").as_deref(), Some("Read,Glob,Grep"));
         assert_eq!(after("--permission-mode").as_deref(), Some("dontAsk"));
         assert_eq!(after("--model").as_deref(), Some("haiku"));
         assert_eq!(after("--system-prompt").as_deref(), Some("PROMPT"));
         assert!(!args.iter().any(|a| a.contains("dangerously")), "permissions must not be bypassed");
+        assert!(!args.contains(&"--add-dir".to_string()), "no extra folder unless asked");
+
+        let with_dir = build_args(&cfg, "PROMPT", &[std::path::PathBuf::from("/data/transcripts")]);
+        let i = with_dir.iter().position(|a| a == "--add-dir");
+        assert_eq!(i.and_then(|i| with_dir.get(i + 1)).map(String::as_str), Some("/data/transcripts"));
     }
 
     #[test]

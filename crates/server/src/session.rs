@@ -174,6 +174,13 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
                         tracing::warn!("dropping link not present on any card: {url}");
                     }
                 }
+                Segment::Watch { url, label } => {
+                    if self.allowed_urls.contains(&url) {
+                        self.msg(ServerMsg::Watch { url, label }).await?;
+                    } else {
+                        tracing::warn!("dropping video link not present in any transcript: {url}");
+                    }
+                }
             }
         }
         if go_on_alone {
@@ -272,6 +279,7 @@ mod tests {
                 Out::Msg(ServerMsg::Reply { .. }) => "reply",
                 Out::Msg(ServerMsg::Transcript { .. }) => "transcript",
                 Out::Msg(ServerMsg::Link { .. }) => "link",
+                Out::Msg(ServerMsg::Watch { .. }) => "watch",
                 Out::Msg(ServerMsg::TurnDone) => "done",
                 Out::Msg(ServerMsg::Error { .. }) => "error",
                 Out::Msg(ServerMsg::SessionEnded { .. }) => "ended",
@@ -330,6 +338,23 @@ mod tests {
         r.session.on_continue().await.map_err(|_| "closed")?;
         assert_eq!(kinds(&drain(&mut r.rx)), vec!["reply", "audio", "audio", "done"]);
         assert_eq!(r.heard.lock().map_err(|_| "poisoned")?.as_slice(), ["don't rush", CONTINUE_MESSAGE]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_watch_turn_sends_the_video_link_after_the_speech_and_only_for_known_videos() -> Result<(), Box<dyn std::error::Error>> {
+        let mut r = rig(vec![], "")?;
+        r.session.tutor.replies = vec![
+            Ok(format!("<say lang=\"en\">Watch this.</say><watch url=\"{}\">Title</watch>", r.url)),
+            Ok("<say lang=\"en\">Watch this.</say><watch url=\"https://www.youtube.com/watch?v=invented\">Title</watch>".into()),
+        ];
+        r.session.on_text("start").await.map_err(|_| "closed")?;
+        let outs = drain(&mut r.rx);
+        assert_eq!(kinds(&outs), vec!["transcript", "reply", "audio", "watch", "done"]);
+        assert_eq!(outs[3], Out::Msg(ServerMsg::Watch { url: r.url.clone(), label: "Title".into() }));
+        // An invented video address is not forwarded.
+        r.session.on_text("again").await.map_err(|_| "closed")?;
+        assert_eq!(kinds(&drain(&mut r.rx)), vec!["transcript", "reply", "audio", "done"]);
         Ok(())
     }
 

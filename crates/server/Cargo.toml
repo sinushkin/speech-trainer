@@ -16,6 +16,7 @@ tracing-subscriber.workspace = true
 futures-util.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 whisper-rs = "0.16.0"
+rand = "0.9"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

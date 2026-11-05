@@ -42,9 +42,12 @@ cargo run --release -p server -- --instruction Instruction.md   # listens on 127
 cargo run --release -p client                                   # speak ("another dialog" switches)
 cargo run --release -p client -- --text                         # type
 cargo run --release -p client -- --pause-ms 3000                # wait longer while you think (default 2000)
+cargo run --release -p client -- --video                        # video mode: a random video, then a drill on it
 ```
 
-After a correction (given in English only) the client waits a few seconds: say "In Russian" for the
+A short beep tells you when the microphone is open and you may speak. In video mode the
+tutor picks a random video, gives you the link, and waits (microphone off) until you have watched
+it and pressed Enter; then it drills the phrases of that video. After a correction (given in English only) the client waits a few seconds: say "In Russian" for the
 Russian version, or stay silent and the lesson goes on. Every connection gets its own Claude process (Haiku, read-only tools inside the dialogs
 folder) that is stopped after the idle timeout (30 minutes). Settings: `SPEECH_TRAINER_BIND`, `SPEECH_TRAINER_CLAUDE_MODEL` (overrides `model` in `Instruction.md`),
 `SPEECH_TRAINER_CLAUDE_PROXY` (optional HTTP proxy for the claude process),

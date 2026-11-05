@@ -15,10 +15,10 @@ aplay ◀── WAV ◀── WebSocket binary ◀── TTS ◀── tagged re
 
 One WebSocket, `GET /ws`.
 
-* Client text frames: `{"type":"hello"}` (first message; optional `"dialog":"16_the_job_interview"` names the dialog to start with),
+* Client text frames: `{"type":"hello"}` (first message; `"video":true` starts video mode; optional `"dialog":"16_the_job_interview"` names the dialog to start with),
   `{"type":"text","text":"..."}` (typed input, bypasses recognition).
 * Client binary frames: one whole utterance, PCM16 little endian, mono, 16 kHz.
-* Server text frames: `ready`, `transcript`, `reply`, `link`, `turn_done`, `error`, `session_ended` (idle timeout; the Claude process was stopped and the connection closes).
+* Server text frames: `watch` (send the learner to a whole video; the client keeps the microphone closed until Enter), `ready`, `transcript`, `reply`, `link`, `turn_done`, `error`, `session_ended` (idle timeout; the Claude process was stopped and the connection closes).
 * Server binary frames: one complete WAV file per spoken segment.
 * `turn_done` means the tutor finished and the microphone may open again. The
   client is half duplex: it ignores the microphone until `turn_done`, so the
@@ -37,6 +37,7 @@ One WebSocket, `GET /ws`.
 | `session` | one turn: utterance, text, tutor, speech and links, back to the client; `drive` serves a connection and ends it after the idle timeout. Generic over `Tutor`, `Transcriber`, `Synthesizer`, so it is tested with in-memory fakes |
 | `stt` | whisper.cpp through `whisper-rs`, English, model loaded once |
 | `markup` | parses the tutor reply; `split_by_script` picks the voice from the alphabet of the text (Cyrillic: Russian voice, Latin: English voice), the `lang` attribute is only a fallback |
+| `videos` | the video transcripts for video mode: which are drillable, a random queue per session (shuffled in code), the set of known video links |
 | `tts` | Piper voices: one resident `piper --json-input` process per language (en, ru) |
 | `audio_loop` | unit test of the whole audio loop: mixed ru/en speech, mp3, recognition, a server turn (no microphone or speakers) |
 | `app` | axum routes; per connection a semaphore slot (`max_sessions`), a new Claude process and `Session::drive` with the idle timeout |

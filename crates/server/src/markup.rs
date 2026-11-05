@@ -1,8 +1,8 @@
 //! Parses the tutor's tagged reply into things to speak and links to show.
 //!
 //! The tutor is told to answer only with
-//! `<say lang="en">…</say>`, `<say lang="ru">…</say>`, `<link url="…">label</link>`
-//! and the bare `<continue/>`, which ends a feedback turn: the lesson goes on by
+//! `<say lang="en">…</say>`, `<say lang="ru">…</say>`, `<link url="…">label</link>`,
+//! `<watch url="…">title</watch>` (send the learner to watch a whole video) and the bare `<continue/>`, which ends a feedback turn: the lesson goes on by
 //! itself unless the learner speaks within a short window.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,8 @@ impl Lang {
 pub enum Segment {
     Say { lang: Lang, text: String },
     Link { url: String, label: String },
+    /// "Watch this video now, the microphone stays closed until you are ready."
+    Watch { url: String, label: String },
     /// "Go on by yourself if the learner stays silent."
     Continue,
 }
@@ -40,6 +42,8 @@ pub fn parse_reply(raw: &str) -> Vec<Segment> {
             parse_say(after)
         } else if after.starts_with("<link") {
             parse_link(after)
+        } else if after.starts_with("<watch") {
+            parse_watch(after)
         } else if after.starts_with("<continue") {
             parse_continue(after)
         } else {
@@ -89,14 +93,24 @@ fn parse_say(s: &str) -> Option<(Option<Segment>, usize)> {
     Some((seg, consumed))
 }
 
-fn parse_link(s: &str) -> Option<(Option<Segment>, usize)> {
+/// `<tag url="…">label</tag>`: returns the url, the label and the bytes consumed.
+fn parse_url_tag(s: &str, close_tag: &str) -> Option<(String, String, usize)> {
     let open_end = s.find('>')?;
     let url = attr(&s[..open_end], "url")?.to_string();
     let body_start = open_end + 1;
-    let close = s[body_start..].find("</link>")?;
+    let close = s[body_start..].find(close_tag)?;
     let label = s[body_start..body_start + close].trim().to_string();
-    let consumed = body_start + close + "</link>".len();
+    Some((url, label, body_start + close + close_tag.len()))
+}
+
+fn parse_link(s: &str) -> Option<(Option<Segment>, usize)> {
+    let (url, label, consumed) = parse_url_tag(s, "</link>")?;
     Some((Some(Segment::Link { url, label }), consumed))
+}
+
+fn parse_watch(s: &str) -> Option<(Option<Segment>, usize)> {
+    let (url, label, consumed) = parse_url_tag(s, "</watch>")?;
+    Some((Some(Segment::Watch { url, label }), consumed))
 }
 
 fn parse_continue(s: &str) -> Option<(Option<Segment>, usize)> {
@@ -155,7 +169,7 @@ pub fn display_text(segments: &[Segment]) -> String {
         .iter()
         .filter_map(|s| match s {
             Segment::Say { text, .. } => Some(text.as_str()),
-            Segment::Link { .. } | Segment::Continue => None,
+            Segment::Link { .. } | Segment::Watch { .. } | Segment::Continue => None,
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -193,6 +207,20 @@ mod tests {
         assert_eq!(parse_reply("1 < 2 and 3 > 2"), vec![say(Lang::En, "1 < 2 and 3 > 2")]);
         assert_eq!(parse_reply("<say lang=\"en\">cut off mid"), vec![say(Lang::En, "cut off mid")]);
         assert!(parse_reply("<say lang=\"en\"></say>").is_empty());
+    }
+
+    #[test]
+    fn the_watch_tag_carries_a_url_and_a_title() {
+        let raw = "<say lang=\"en\">Watch this.</say><watch url=\"https://www.youtube.com/watch?v=abc\">Фразы с GET</watch>";
+        assert_eq!(
+            parse_reply(raw),
+            vec![
+                say(Lang::En, "Watch this."),
+                Segment::Watch { url: "https://www.youtube.com/watch?v=abc".into(), label: "Фразы с GET".into() },
+            ]
+        );
+        // A tag without a url is ignored rather than guessed.
+        assert!(parse_reply("<watch>no url</watch>").iter().all(|s| !matches!(s, Segment::Watch { .. })));
     }
 
     #[test]

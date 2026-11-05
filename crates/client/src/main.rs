@@ -15,6 +15,9 @@ use protocol::{ClientMsg, ServerMsg, wav};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_tungstenite::tungstenite::Message;
 
+/// What the tutor is told when you press Enter after watching a video.
+const READY_MESSAGE: &str = "I have watched the video. I am ready.";
+
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
@@ -27,12 +30,17 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-fn show(msg: &ServerMsg) {
+fn show(msg: &ServerMsg, video: bool) {
     match msg {
-        ServerMsg::Ready { dialogs } => println!("== session started ({dialogs} dialogs available; say \"another dialog\" to switch)"),
+        ServerMsg::Ready { .. } if video => println!("== session started in video mode (say \"another video\" or \"next dialog\" to switch)"),
+        ServerMsg::Ready { dialogs } => println!("== session started ({dialogs} dialogs available; say \"next dialog\" or \"video mode\" to switch)"),
         ServerMsg::Transcript { text } => println!("you:   {text}"),
         ServerMsg::Reply { text } => println!("tutor: {text}"),
         ServerMsg::Link { url, label } => println!("watch: {label}  {url}"),
+        ServerMsg::Watch { url, label } => {
+            println!("video: {label}\n       {url}");
+            println!("(watch it on YouTube, then press Enter here to start the training)");
+        }
         ServerMsg::ContinueIfSilent { after_ms } => {
             println!("(say \"in Russian\" within {:.0} s for the Russian version, or stay silent to go on)", f64::from(*after_ms) / 1000.0);
         }
@@ -63,22 +71,22 @@ async fn main() -> Result<()> {
 
     let (ws, _) = tokio_tungstenite::connect_async(&url).await.with_context(|| format!("cannot connect to {url}"))?;
     let (mut sink, mut stream) = ws.split();
-    let hello = serde_json::to_string(&ClientMsg::Hello { dialog })?;
+    let hello = serde_json::to_string(&ClientMsg::Hello { dialog, video: args.video })?;
     sink.send(Message::Text(hello.into())).await?;
 
     // Frames from the microphone (or typed lines in --text mode) arrive here.
     let (mic_tx, mut mic_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(256);
     let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(8);
-    if text_mode {
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(tokio::io::stdin()).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line_tx.send(line).await.is_err() {
-                    break;
-                }
+    // The keyboard: answers in text mode, and the Enter key after watching a video.
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line_tx.send(line).await.is_err() {
+                break;
             }
-        });
-    } else {
+        }
+    });
+    if !text_mode {
         let mut mic = audio::Mic::open(env("SPEECH_TRAINER_ARECORD_DEVICE").as_deref())?;
         tokio::spawn(async move {
             loop {
@@ -105,6 +113,11 @@ async fn main() -> Result<()> {
         ..vad::VadConfig::default()
     });
     let mut listening = false; // false until the tutor's first turn is done
+    // A video was assigned: the microphone stays closed (the video's sound would
+    // be recorded) until the learner presses Enter.
+    let mut awaiting_ready = false;
+    let mut stdin_open = true;
+    let beep = audio::beep_wav();
     // After a correction the tutor waits a moment for the learner (who may ask
     // "in Russian"); if nobody speaks it goes on by itself.
     let mut silence_window: Option<u32> = None; // announced by the server, armed at turn_done
@@ -123,14 +136,27 @@ async fn main() -> Result<()> {
                 match incoming.context("connection error")? {
                     Message::Text(t) => match serde_json::from_str::<ServerMsg>(&t) {
                         Ok(msg) => {
-                            show(&msg);
+                            show(&msg, args.video);
                             if matches!(msg, ServerMsg::SessionEnded { .. }) {
                                 break;
                             }
                             if let ServerMsg::ContinueIfSilent { after_ms } = msg {
                                 silence_window = Some(after_ms);
                             }
-                            if matches!(msg, ServerMsg::TurnDone) {
+                            if matches!(msg, ServerMsg::Watch { .. }) {
+                                awaiting_ready = true;
+                            }
+                            if matches!(msg, ServerMsg::TurnDone) && awaiting_ready {
+                                // No beep and no microphone until Enter.
+                                continue_deadline = None;
+                                silence_window = None;
+                            } else if matches!(msg, ServerMsg::TurnDone) {
+                                // The beep says "you can speak now". It comes first, so that
+                                // the microphone does not pick it up: older audio is dropped after it.
+                                if !text_mode
+                                    && let Err(e) = audio::play_wav(&beep, play_device.as_deref()).await {
+                                        tracing::warn!("beep failed: {e}");
+                                    }
                                 while mic_rx.try_recv().is_ok() {} // stale audio from while the tutor spoke
                                 vad.reset();
                                 listening = true;
@@ -139,7 +165,7 @@ async fn main() -> Result<()> {
                                     .take()
                                     .filter(|_| !text_mode)
                                     .map(|ms| tokio::time::Instant::now() + std::time::Duration::from_millis(u64::from(ms)));
-                                if !text_mode { println!("(your turn, speak)"); }
+                                println!("({})", if text_mode { "your turn, type your answer" } else { "your turn, speak" });
                             }
                         }
                         Err(e) => tracing::warn!("unreadable server message: {e}"),
@@ -174,9 +200,20 @@ async fn main() -> Result<()> {
                     sink.send(Message::Binary(wav::pcm16_to_bytes(&utterance).into())).await?;
                 }
             }
-            line = line_rx.recv(), if text_mode => {
-                let Some(line) = line else { break };
-                if !listening || line.trim().is_empty() { continue; }
+            line = line_rx.recv(), if stdin_open => {
+                let Some(line) = line else {
+                    if text_mode { break; }
+                    stdin_open = false; // by voice the keyboard is optional
+                    continue;
+                };
+                if awaiting_ready {
+                    awaiting_ready = false;
+                    listening = false;
+                    let text = if line.trim().is_empty() { READY_MESSAGE.to_string() } else { line };
+                    sink.send(Message::Text(serde_json::to_string(&ClientMsg::Text { text })?.into())).await?;
+                    continue;
+                }
+                if !text_mode || !listening || line.trim().is_empty() { continue; }
                 listening = false;
                 // `/continue` plays the part of the silence window in text mode.
                 let msg = if line.trim() == "/continue" {
