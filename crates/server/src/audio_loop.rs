@@ -150,7 +150,7 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
     assert!(normalise(&heard).contains("around the clock"), "the English part was not recognised: {heard:?}");
 
     // 5. The same audio as a learner's utterance through a whole server turn.
-    let tutor = FixedTutor("<say lang=\"ru\">Ты сказал это по-английски. Отлично!</say><say lang=\"en\">Well done. That is how a native speaker says it.</say>");
+    let tutor = FixedTutor("<say lang=\"en\">Ты сказал это по-английски. Отлично! Well done. That is how a native speaker says it.</say>");
     let dialog = crate::dialog::parse(include_str!("../tests/fixtures/16_the_job_interview.md"))?;
     let (tx, mut rx) = mpsc::channel(64);
     let urls = dialog.cards.iter().map(|c| c.url.clone()).collect();
@@ -177,7 +177,7 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
     assert!(normalise(&transcript).contains("around the clock"), "turn transcript: {transcript:?}");
     lap("server turn (recognise again + fake tutor + 2 spoken parts)", Some(seconds));
     println!("[timing] whole test: {:.2} s", t0.elapsed().as_secs_f32());
-    assert_eq!(audio_pieces, 2, "expected one Russian and one English audio part");
+    assert_eq!(audio_pieces, 2, "one tag with Russian and English text must become a Russian and an English audio part");
     assert!(finished, "the turn never finished");
     Ok(())
 }

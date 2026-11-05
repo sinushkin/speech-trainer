@@ -104,6 +104,51 @@ fn parse_continue(s: &str) -> Option<(Option<Segment>, usize)> {
     Some((Some(Segment::Continue), end + 1))
 }
 
+fn script_of(c: char) -> Option<Lang> {
+    if ('\u{400}'..='\u{4FF}').contains(&c) {
+        Some(Lang::Ru)
+    } else if c.is_alphabetic() {
+        Some(Lang::En)
+    } else {
+        None
+    }
+}
+
+/// Splits text into runs that are each read by the right voice, going by the
+/// alphabet of the text itself and ignoring what the tutor wrote in the `lang`
+/// attribute: Cyrillic letters are read by the Russian voice, Latin letters by
+/// the English one. A model sometimes puts Russian words into an English tag (or
+/// the other way round) and the English voice cannot read Cyrillic.
+///
+/// Digits, spaces and punctuation stay with the run they follow. Text with no
+/// letters at all (for example "25") is read by the `fallback` voice, and text
+/// with nothing readable is dropped.
+pub fn split_by_script(fallback: Lang, text: &str) -> Vec<(Lang, String)> {
+    let mut runs: Vec<(Lang, String)> = Vec::new();
+    let mut leading = String::new();
+    for c in text.chars() {
+        match (script_of(c), runs.last_mut()) {
+            (Some(lang), Some((last, run))) if *last == lang => run.push(c),
+            (Some(lang), _) => {
+                let mut run = std::mem::take(&mut leading);
+                run.push(c);
+                runs.push((lang, run));
+            }
+            (None, Some((_, run))) => run.push(c),
+            (None, None) => leading.push(c),
+        }
+    }
+    let mut runs: Vec<(Lang, String)> =
+        runs.into_iter().map(|(lang, run)| (lang, run.trim().to_string())).filter(|(_, run)| !run.is_empty()).collect();
+    if runs.is_empty() {
+        let rest = leading.trim();
+        if rest.chars().any(char::is_alphanumeric) {
+            runs.push((fallback, rest.to_string()));
+        }
+    }
+    runs
+}
+
 /// Plain text of the spoken parts, for display.
 pub fn display_text(segments: &[Segment]) -> String {
     segments
@@ -160,6 +205,51 @@ mod tests {
         }
         // The tag alone is not spoken text, so nothing falls back to "untagged English".
         assert_eq!(parse_reply("<continue/>"), vec![Segment::Continue]);
+    }
+
+    fn runs(fallback: Lang, text: &str) -> Vec<(Lang, String)> {
+        split_by_script(fallback, text)
+    }
+
+    fn run(lang: Lang, text: &str) -> (Lang, String) {
+        (lang, text.to_string())
+    }
+
+    #[test]
+    fn russian_words_in_an_english_tag_go_to_the_russian_voice_and_back() {
+        assert_eq!(runs(Lang::En, "Привет, это урок."), vec![run(Lang::Ru, "Привет, это урок.")]);
+        assert_eq!(runs(Lang::Ru, "Take your time."), vec![run(Lang::En, "Take your time.")]);
+        assert_eq!(runs(Lang::En, "Hello."), vec![run(Lang::En, "Hello.")]);
+    }
+
+    #[test]
+    fn a_mixed_sentence_is_split_where_the_alphabet_changes() {
+        assert_eq!(
+            runs(Lang::Ru, "Native-версия: My manager gave us two days. Фраза put together значит собрать."),
+            vec![
+                run(Lang::En, "Native-"),
+                run(Lang::Ru, "версия:"),
+                run(Lang::En, "My manager gave us two days."),
+                run(Lang::Ru, "Фраза"),
+                run(Lang::En, "put together"),
+                run(Lang::Ru, "значит собрать."),
+            ]
+        );
+    }
+
+    #[test]
+    fn digits_and_punctuation_follow_the_run_and_letterless_text_uses_the_tag() {
+        assert_eq!(runs(Lang::Ru, "Карточка 25, вопрос 3!"), vec![run(Lang::Ru, "Карточка 25, вопрос 3!")]);
+        assert_eq!(runs(Lang::Ru, "— Хорошо."), vec![run(Lang::Ru, "— Хорошо.")]);
+        assert_eq!(runs(Lang::En, "25"), vec![run(Lang::En, "25")]);
+        assert_eq!(runs(Lang::Ru, "42"), vec![run(Lang::Ru, "42")]);
+        assert!(runs(Lang::En, "...").is_empty());
+        assert!(runs(Lang::En, "   ").is_empty());
+        // Quotes around an English phrase inside Russian text.
+        assert_eq!(
+            runs(Lang::Ru, "Скажи «take your time» спокойно."),
+            vec![run(Lang::Ru, "Скажи «"), run(Lang::En, "take your time»"), run(Lang::Ru, "спокойно.")]
+        );
     }
 
     #[test]

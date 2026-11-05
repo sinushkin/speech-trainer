@@ -157,11 +157,16 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         for segment in segments {
             match segment {
                 Segment::Continue => go_on_alone = true,
-                Segment::Say { lang, text } => match self.tts.synthesize(lang, &text).await {
-                    Ok(audio) => self.emit(Out::Audio(audio)).await?,
-                    // A missing voice must not end the lesson: the text was already sent.
-                    Err(e) => tracing::warn!("speech synthesis ({}) failed: {e}", lang.code()),
-                },
+                // The voice follows the alphabet of the text, not the tag's `lang`.
+                Segment::Say { lang, text } => {
+                    for (voice, part) in markup::split_by_script(lang, &text) {
+                        match self.tts.synthesize(voice, &part).await {
+                            Ok(audio) => self.emit(Out::Audio(audio)).await?,
+                            // A missing voice must not end the lesson: the text was already sent.
+                            Err(e) => tracing::warn!("speech synthesis ({}) failed: {e}", voice.code()),
+                        }
+                    }
+                }
                 Segment::Link { url, label } => {
                     if self.allowed_urls.contains(&url) {
                         self.msg(ServerMsg::Link { url, label }).await?;
@@ -212,10 +217,17 @@ mod tests {
         }
     }
 
-    struct FakeTts;
+    /// Remembers which voice was asked to read what.
+    #[derive(Default)]
+    struct FakeTts {
+        calls: Mutex<Vec<(Lang, String)>>,
+    }
     impl Synthesizer for FakeTts {
         async fn synthesize(&self, lang: Lang, text: &str) -> Result<Vec<u8>, BackendError> {
-            if lang == Lang::Ru && text.contains("FAIL") {
+            if let Ok(mut calls) = self.calls.lock() {
+                calls.push((lang, text.to_string()));
+            }
+            if lang == Lang::Ru && text.contains("Ошибка") {
                 return Err(BackendError::Failed("no ru voice".into()));
             }
             Ok(wav::encode_pcm16_mono(&[0i16; 8], 22_050))
@@ -228,6 +240,7 @@ mod tests {
         session: Session<FakeTutor, FakeStt, FakeTts>,
         rx: mpsc::Receiver<Out>,
         heard: Arc<Mutex<Vec<String>>>,
+        tts: Arc<FakeTts>,
         url: String,
     }
 
@@ -238,8 +251,9 @@ mod tests {
         let (tx, rx) = mpsc::channel(64);
         let heard = Arc::new(Mutex::new(Vec::new()));
         let tutor = FakeTutor { replies, heard: heard.clone() };
-        let session = Session::new(Arc::new(urls), tutor, Arc::new(FakeStt(stt_text)), Arc::new(FakeTts), tx, Duration::from_secs(3));
-        Ok(Rig { session, rx, heard, url })
+        let tts = Arc::new(FakeTts::default());
+        let session = Session::new(Arc::new(urls), tutor, Arc::new(FakeStt(stt_text)), tts.clone(), tx, Duration::from_secs(3));
+        Ok(Rig { session, rx, heard, tts, url })
     }
 
     fn drain(rx: &mut mpsc::Receiver<Out>) -> Vec<Out> {
@@ -339,9 +353,36 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_voice_skips_the_audio_but_not_the_turn() -> Result<(), Box<dyn std::error::Error>> {
-        let mut r = rig(vec![Ok("<say lang=\"ru\">FAIL это</say><say lang=\"en\">ok</say>".into())], "")?;
+        let mut r = rig(vec![Ok("<say lang=\"ru\">Ошибка голоса</say><say lang=\"en\">ok</say>".into())], "")?;
         r.session.on_text("x").await.map_err(|_| "closed")?;
         assert_eq!(kinds(&drain(&mut r.rx)), vec!["transcript", "reply", "audio", "done"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn each_voice_reads_its_own_alphabet_whatever_the_tag_says() -> Result<(), Box<dyn std::error::Error>> {
+        // The tutor puts Russian into an English tag and English into a Russian one.
+        let reply = "<say lang=\"en\">Привет! Say it again.</say><say lang=\"ru\">Фраза put together значит собрать.</say>";
+        let mut r = rig(vec![Ok(reply.into())], "")?;
+        r.session.on_text("x").await.map_err(|_| "closed")?;
+        let outs = drain(&mut r.rx);
+        assert_eq!(kinds(&outs), vec!["transcript", "reply", "audio", "audio", "audio", "audio", "audio", "done"]);
+        // What is shown on screen is the tutor's text as written, not cut into pieces.
+        assert_eq!(
+            outs[1],
+            Out::Msg(ServerMsg::Reply { text: "Привет! Say it again. Фраза put together значит собрать.".into() })
+        );
+        let calls = r.tts.calls.lock().map_err(|_| "poisoned")?.clone();
+        assert_eq!(
+            calls,
+            vec![
+                (Lang::Ru, "Привет!".to_string()),
+                (Lang::En, "Say it again.".to_string()),
+                (Lang::Ru, "Фраза".to_string()),
+                (Lang::En, "put together".to_string()),
+                (Lang::Ru, "значит собрать.".to_string()),
+            ]
+        );
         Ok(())
     }
 

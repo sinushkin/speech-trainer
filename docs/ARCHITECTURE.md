@@ -34,9 +34,9 @@ One WebSocket, `GET /ws`.
 | `dialog`, `library` | parse the dialog Markdown; the library scans the folder at start: a catalogue for the prompt and the set of all card video links |
 | `prompt` | the tutor's system prompt: rules and reply format, the instruction text, the catalogue |
 | `claude` | one resident `claude -p --input-format stream-json` process per session, working directory = the dialogs folder, tools limited to `Read,Glob,Grep`, `dontAsk` permission mode. The tutor itself finds and switches dialogs when the learner asks |
-| `markup` | parses the tutor's reply: `<say lang="en|ru">`, `<link url="...">` |
 | `session` | one turn: utterance, text, tutor, speech and links, back to the client; `drive` serves a connection and ends it after the idle timeout. Generic over `Tutor`, `Transcriber`, `Synthesizer`, so it is tested with in-memory fakes |
 | `stt` | whisper.cpp through `whisper-rs`, English, model loaded once |
+| `markup` | parses the tutor reply; `split_by_script` picks the voice from the alphabet of the text (Cyrillic: Russian voice, Latin: English voice), the `lang` attribute is only a fallback |
 | `tts` | Piper voices: one resident `piper --json-input` process per language (en, ru) |
 | `audio_loop` | unit test of the whole audio loop: mixed ru/en speech, mp3, recognition, a server turn (no microphone or speakers) |
 | `app` | axum routes; per connection a semaphore slot (`max_sessions`), a new Claude process and `Session::drive` with the idle timeout |

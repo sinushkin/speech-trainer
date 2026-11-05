@@ -182,6 +182,9 @@ mod tests {
     fn the_repository_instruction_file_is_valid() -> Result<(), InstructionError> {
         let i = load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Instruction.md")))?;
         assert!(i.body.len() > 200);
+        for command in ["next dialog", "previous dialog", "another dialog", "repeat", "in Russian"] {
+            assert!(i.body.contains(command), "the instruction file must list the command {command:?}");
+        }
         assert_eq!(i.session_timeout, Duration::from_secs(30 * 60));
         Ok(())
     }
