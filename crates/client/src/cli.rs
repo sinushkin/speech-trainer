@@ -5,13 +5,14 @@ pub const DEFAULT_PAUSE_MS: u32 = 2000;
 pub const DEFAULT_MAX_UTTERANCE_SEC: u32 = 30;
 
 pub const USAGE: &str = concat!(
-    "usage: client [dialog-name | --video] [--text] [--pause-ms N] [--max-utterance-sec N]\n",
+    "usage: client [dialog-name | --video] [--text] [--no-calibration] [--pause-ms N] [--max-utterance-sec N]\n",
     "  dialog-name            dialog to start with; without it the tutor chooses,\n",
     "                         and you can ask it to switch\n",
     "  --video                video mode: the tutor picks a random video and gives you the link;\n",
     "                         watch it on YouTube, press Enter, and the training on it starts\n",
     "  --text                 type your answers instead of speaking (no microphone needed);\n",
     "                         the line /continue acts as the silence window after a correction\n",
+    "  --no-calibration       skip the microphone check at start (quiet, then say something)\n",
     "  --pause-ms N           silence that ends your answer, in milliseconds (default 2000,\n",
     "                         env SPEECH_TRAINER_PAUSE_MS); raise it if you need time to think\n",
     "  --max-utterance-sec N  longest single answer in seconds (default 30,\n",
@@ -23,6 +24,7 @@ pub struct Args {
     pub dialog: Option<String>,
     pub video: bool,
     pub text_mode: bool,
+    pub calibrate: bool,
     pub pause_ms: u32,
     pub max_utterance_sec: u32,
 }
@@ -46,6 +48,7 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Pa
     let mut dialog = None;
     let mut text_mode = false;
     let mut video = false;
+    let mut calibrate = true;
     let mut pause = env("SPEECH_TRAINER_PAUSE_MS").map(|v| ("SPEECH_TRAINER_PAUSE_MS", v));
     let mut max_sec = env("SPEECH_TRAINER_MAX_UTTERANCE_SEC").map(|v| ("SPEECH_TRAINER_MAX_UTTERANCE_SEC", v));
 
@@ -62,6 +65,7 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Pa
             "-h" | "--help" => return Ok(Parsed::Help),
             "--text" => text_mode = true,
             "--video" => video = true,
+            "--no-calibration" => calibrate = false,
             "--pause-ms" => pause = Some(("--pause-ms", value("--pause-ms")?)),
             "--max-utterance-sec" => max_sec = Some(("--max-utterance-sec", value("--max-utterance-sec")?)),
             f if f.starts_with('-') => return Err(format!("unknown option {f}")),
@@ -87,7 +91,7 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Pa
     if video && dialog.is_some() {
         return Err("give either a dialog name or --video, not both".into());
     }
-    Ok(Parsed::Run(Args { dialog, video, text_mode, pause_ms, max_utterance_sec }))
+    Ok(Parsed::Run(Args { dialog, video, text_mode, calibrate, pause_ms, max_utterance_sec }))
 }
 
 #[cfg(test)]
@@ -109,14 +113,14 @@ mod tests {
     #[test]
     fn defaults_are_two_seconds_of_pause_and_thirty_seconds_per_answer() -> Result<(), String> {
         let a = args(run(&[], &[]))?;
-        assert_eq!(a, Args { dialog: None, video: false, text_mode: false, pause_ms: 2000, max_utterance_sec: 30 });
+        assert_eq!(a, Args { dialog: None, video: false, text_mode: false, calibrate: true, pause_ms: 2000, max_utterance_sec: 30 });
         Ok(())
     }
 
     #[test]
     fn flags_are_read_with_a_space_or_an_equals_sign_and_do_not_become_the_dialog() -> Result<(), String> {
         let a = args(run(&["--pause-ms", "3500", "16_the_job_interview", "--text", "--max-utterance-sec=45"], &[]))?;
-        assert_eq!(a, Args { dialog: Some("16_the_job_interview".into()), video: false, text_mode: true, pause_ms: 3500, max_utterance_sec: 45 });
+        assert_eq!(a, Args { dialog: Some("16_the_job_interview".into()), video: false, text_mode: true, calibrate: true, pause_ms: 3500, max_utterance_sec: 45 });
         assert_eq!(args(run(&["--pause-ms=1200"], &[]))?.pause_ms, 1200);
         Ok(())
     }
@@ -152,6 +156,12 @@ mod tests {
     fn the_video_flag_is_read() -> Result<(), String> {
         let a = args(run(&["--video", "--text"], &[]))?;
         assert!(a.video && a.text_mode && a.dialog.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn calibration_can_be_switched_off() -> Result<(), String> {
+        assert!(!args(run(&["--no-calibration"], &[]))?.calibrate);
         Ok(())
     }
 

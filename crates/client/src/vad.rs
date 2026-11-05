@@ -86,6 +86,11 @@ impl Vad {
         }
     }
 
+    /// The calibrated speech threshold, once the noise floor is measured.
+    pub fn threshold(&self) -> Option<f32> {
+        self.threshold
+    }
+
     fn ms_to_samples(&self, ms: u32) -> usize {
         (self.cfg.sample_rate as usize * ms as usize) / 1000
     }

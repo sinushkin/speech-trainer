@@ -51,6 +51,7 @@ any other URL in a reply is dropped.
   (30 ms frames, RMS floor 120, 800 ms trailing silence, 300 ms minimum, 15 s
   cap), plus noise-floor calibration and 240 ms pre-roll so the first word is not cut.
 * `audio`: `arecord`/`aplay` subprocesses (work through PipeWire/Pulse default devices).
+* At start (before connecting) the client runs a microphone check: quiet, beep, "say something", playback of what was heard; repeatable, `--no-calibration` skips it.
 * `--text` mode types answers instead of speaking.
 
 ## Status

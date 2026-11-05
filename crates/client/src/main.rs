@@ -6,6 +6,7 @@
 //!   SPEECH_TRAINER_ARECORD_DEVICE, SPEECH_TRAINER_APLAY_DEVICE.
 
 mod audio;
+mod calibrate;
 mod cli;
 mod vad;
 
@@ -69,11 +70,6 @@ async fn main() -> Result<()> {
     let url = env("SPEECH_TRAINER_URL").unwrap_or_else(|| "ws://127.0.0.1:8765/ws".into());
     let play_device = env("SPEECH_TRAINER_APLAY_DEVICE");
 
-    let (ws, _) = tokio_tungstenite::connect_async(&url).await.with_context(|| format!("cannot connect to {url}"))?;
-    let (mut sink, mut stream) = ws.split();
-    let hello = serde_json::to_string(&ClientMsg::Hello { dialog, video: args.video })?;
-    sink.send(Message::Text(hello.into())).await?;
-
     // Frames from the microphone (or typed lines in --text mode) arrive here.
     let (mic_tx, mut mic_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(256);
     let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(8);
@@ -107,28 +103,34 @@ async fn main() -> Result<()> {
         });
     }
 
-    let mut vad = vad::Vad::new(vad::VadConfig {
+    let beep = audio::beep_wav();
+    let vad_cfg = vad::VadConfig {
         trailing_silence_ms: args.pause_ms,
         max_utterance_ms: args.max_utterance_sec * 1000,
         ..vad::VadConfig::default()
-    });
+    };
+    // The microphone check comes before the connection, so the session clock
+    // (and a tutor process) does not start while the learner tunes the setup.
+    let mut vad = if text_mode || !args.calibrate {
+        vad::Vad::new(vad_cfg)
+    } else {
+        calibrate::run(vad_cfg, &mut mic_rx, &mut line_rx, play_device.as_deref(), &beep).await?
+    };
+
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.with_context(|| format!("cannot connect to {url}"))?;
+    let (mut sink, mut stream) = ws.split();
+    let hello = serde_json::to_string(&ClientMsg::Hello { dialog, video: args.video })?;
+    sink.send(Message::Text(hello.into())).await?;
+
     let mut listening = false; // false until the tutor's first turn is done
     // A video was assigned: the microphone stays closed (the video's sound would
     // be recorded) until the learner presses Enter.
     let mut awaiting_ready = false;
     let mut stdin_open = true;
-    let beep = audio::beep_wav();
     // After a correction the tutor waits a moment for the learner (who may ask
     // "in Russian"); if nobody speaks it goes on by itself.
     let mut silence_window: Option<u32> = None; // announced by the server, armed at turn_done
     let mut continue_deadline: Option<tokio::time::Instant> = None;
-    if !text_mode {
-        println!(
-            "calibrating the microphone, stay quiet for a moment... (an answer ends after {:.1} s of silence; --pause-ms changes that)",
-            f64::from(args.pause_ms) / 1000.0
-        );
-    }
-
     loop {
         tokio::select! {
             incoming = stream.next() => {
