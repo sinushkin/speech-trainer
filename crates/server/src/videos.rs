@@ -6,7 +6,7 @@
 //! model is a poor random number generator) and knows which links are real.
 
 use rand::seq::SliceRandom;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 /// A video needs at least this many phrases with an English example to be worth a drill.
@@ -86,13 +86,18 @@ impl VideoLibrary {
         Ok(lib)
     }
 
-    /// Up to `n` different videos in random order.
-    pub fn queue<R: rand::Rng + ?Sized>(&self, rng: &mut R, n: usize) -> Vec<&VideoEntry> {
-        let mut all: Vec<&VideoEntry> = self.videos.iter().collect();
+    /// Up to `n` different videos in random order, leaving out the ids in `seen`.
+    pub fn queue<R: rand::Rng + ?Sized>(&self, rng: &mut R, n: usize, seen: &BTreeSet<String>) -> Vec<&VideoEntry> {
+        let mut all: Vec<&VideoEntry> = self.videos.iter().filter(|v| !seen.contains(&v.id)).collect();
         all.shuffle(rng);
         all.truncate(n);
         all
     }
+}
+
+/// The video id of a page address made by `video_url`.
+pub fn video_id(url: &str) -> Option<&str> {
+    url.strip_prefix("https://www.youtube.com/watch?v=").filter(|id| !id.is_empty())
 }
 
 /// The queue as lines for the tutor's prompt.
@@ -154,8 +159,8 @@ mod tests {
     #[test]
     fn the_queue_is_a_random_order_of_different_videos() {
         let lib = many(50);
-        let a = lib.queue(&mut StdRng::seed_from_u64(1), 30);
-        let b = lib.queue(&mut StdRng::seed_from_u64(2), 30);
+        let a = lib.queue(&mut StdRng::seed_from_u64(1), 30, &BTreeSet::new());
+        let b = lib.queue(&mut StdRng::seed_from_u64(2), 30, &BTreeSet::new());
         assert_eq!(a.len(), 30);
         let unique: HashSet<&str> = a.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(unique.len(), 30, "no video twice");
@@ -166,14 +171,28 @@ mod tests {
 
     #[test]
     fn a_small_library_gives_a_short_queue_and_an_empty_one_an_empty_queue() {
-        assert_eq!(many(3).queue(&mut StdRng::seed_from_u64(1), 30).len(), 3);
-        assert!(many(0).queue(&mut StdRng::seed_from_u64(1), 30).is_empty());
+        assert_eq!(many(3).queue(&mut StdRng::seed_from_u64(1), 30, &BTreeSet::new()).len(), 3);
+        assert!(many(0).queue(&mut StdRng::seed_from_u64(1), 30, &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn watched_videos_are_left_out_of_the_queue() {
+        let lib = many(5);
+        let seen: BTreeSet<String> = ["id0", "id1", "id2"].iter().map(|s| s.to_string()).collect();
+        let ids: BTreeSet<&str> = lib.queue(&mut StdRng::seed_from_u64(1), 30, &seen).iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, BTreeSet::from(["id3", "id4"]));
+    }
+
+    #[test]
+    fn the_id_comes_out_of_the_page_address() {
+        assert_eq!(video_id(&video_url("2oScAyV9p0A")), Some("2oScAyV9p0A"));
+        assert_eq!(video_id("https://youtu.be/2oScAyV9p0A?t=5"), None);
     }
 
     #[test]
     fn queue_text_has_the_id_the_title_the_size_and_the_url() {
         let lib = many(2);
-        let q = lib.queue(&mut StdRng::seed_from_u64(5), 2);
+        let q = lib.queue(&mut StdRng::seed_from_u64(5), 2, &BTreeSet::new());
         let text = queue_text(&q);
         let first = q[0];
         assert!(text.starts_with(&format!("1. {} | {} | 10 phrases | https://www.youtube.com/watch?v={}", first.id, first.title, first.id)));

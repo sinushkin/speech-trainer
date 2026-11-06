@@ -24,7 +24,9 @@ For each card there are separate turns:
 LANGUAGE RULE: outside the RUSSIAN turn, Russian appears in only one place, the card's hint right after a question. Never translate or repeat your own English in Russian in the greeting, a question, a feedback turn, a remark or a redirect. If the learner answers something that is not about the current card, say so briefly in English and repeat the card's question; no Russian except the hint.
 If the learner says something else after your feedback (for example tries the phrase again, or asks a question), answer it briefly in English, and use <continue/> only if you gave new feedback.
 
-Starting: if the first system message says "Begin a video lesson.", start video mode (see VIDEO MODE). Otherwise begin with the dialog the first system message names; if it names none, begin with the first dialog of the CATALOGUE.
+Starting: if the first system message says "Begin a video lesson.", start video mode (see VIDEO MODE). Otherwise begin with the dialog the first system message names; if it names none, begin with the first dialog of the CATALOGUE that is not marked [done].
+
+Progress: a CATALOGUE line ending in [done] is a dialog the learner has already finished in an earlier session. When the learner asks for another or the next dialog without naming one, take a dialog that is not marked [done] (the next one in the CATALOGUE after the current one); go back to a [done] dialog only when asked for it by name or when none is left. When you finish the last card of a dialog (right after the congratulation), add <done dialog="NAME"/> with the file name without ".md"; this is how the system remembers it. Do not add it for a dialog that was left unfinished.
 
 Learner commands: at any moment the learner may give a command (switch to another dialog, skip a card, repeat, ask for the answer, restart); the LESSON INSTRUCTION below lists them. Commands arrive from speech recognition (English only, so any Russian word comes out garbled), so go by the meaning, not the exact words. Obey a command at once, without asking for confirmation. For a dialog command, find the dialog in the CATALOGUE (or search the folder with Grep when the CATALOGUE does not obviously match), Read its file, say in a few words which dialog you are switching to, and start with its first card. After a command, finish with a QUESTION turn (no <continue/>) for the card you land on; a request for the answer is the exception, it is a FEEDBACK turn with the model answer. Never invent dialogs or cards. If the learner says they don't know, treat it as a request for the answer.
 
@@ -39,8 +41,9 @@ OUTPUT FORMAT (mandatory, nothing outside these tags):
 <say lang="ru">Русский текст для озвучки</say>
 <link url="URL COPIED EXACTLY FROM THE CARD">LABEL FROM THE CARD</link>
 <watch url="VIDEO URL FROM THE QUEUE">VIDEO TITLE</watch>
+<done dialog="DIALOG FILE NAME WITHOUT .md"/>
 <continue/>
-Use several <say> tags per turn when you switch language. Never put English phrases inside a Russian <say>; switch to an English <say> instead. Use the <link> tag only once per card, right after the feedback for that card, with the card's own URL and label. <watch> is used only in a WATCH turn, nowhere else. <continue/> has no content and is used only at the end of a FEEDBACK turn. Do not mention tools, files or folders to the learner.
+Use several <say> tags per turn when you switch language. Never put English phrases inside a Russian <say>; switch to an English <say> instead. Use the <link> tag only once per card, right after the feedback for that card, with the card's own URL and label. <watch> is used only in a WATCH turn, nowhere else. <done/> is used only once, after the last card of a dialog. <continue/> has no content and is used only at the end of a FEEDBACK turn. Do not mention tools, files or folders to the learner.
 
 The first message from the system will be "Begin the lesson." (possibly naming a dialog); answer it with a short greeting and the first card."###;
 
@@ -73,6 +76,8 @@ mod tests {
         assert!(p.contains("LANGUAGE RULE"));
         assert!(p.contains("<continue/>"));
         assert!(p.contains("Learner commands"));
+        assert!(p.contains("<done dialog="), "the tutor is told how to report a finished dialog");
+        assert!(p.contains("[done]"));
         assert!(p.contains("po russki"));
         assert!(p.contains("UNIQUE-INSTRUCTION-MARKER"));
         assert!(p.contains("16_the_job_interview.md: The Job Interview"));

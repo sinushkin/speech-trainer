@@ -4,7 +4,7 @@
 //! cards are real, so that an invented link is never forwarded.
 
 use crate::dialog;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,9 +51,16 @@ impl Library {
         self.entries.iter().any(|e| e.name == name)
     }
 
-    /// One line per dialog, for the tutor's system prompt.
-    pub fn catalogue(&self) -> String {
-        self.entries.iter().map(|e| format!("- {}.md: {} ({} cards)", e.name, e.title, e.cards)).collect::<Vec<_>>().join("\n")
+    /// One line per dialog for the tutor's system prompt; finished dialogs are marked `[done]`.
+    pub fn catalogue_marking(&self, done: &BTreeSet<String>) -> String {
+        self.entries
+            .iter()
+            .map(|e| {
+                let mark = if done.contains(&e.name) { " [done]" } else { "" };
+                format!("- {}.md: {} ({} cards){mark}", e.name, e.title, e.cards)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -73,7 +80,15 @@ mod tests {
         assert_eq!(lib.urls.len(), 12);
         assert!(lib.urls.iter().all(|u| u.starts_with("https://youtu.be/")));
         assert!(lib.has("16_the_job_interview") && !lib.has("17_flatmates_at_war"));
-        assert_eq!(lib.catalogue(), "- 16_the_job_interview.md: The Job Interview (12 cards)");
+        assert_eq!(lib.catalogue_marking(&BTreeSet::new()), "- 16_the_job_interview.md: The Job Interview (12 cards)");
+        Ok(())
+    }
+
+    #[test]
+    fn finished_dialogs_are_marked_in_the_catalogue() -> std::io::Result<()> {
+        let lib = Library::scan(&fixtures())?;
+        let done = BTreeSet::from(["16_the_job_interview".to_string()]);
+        assert_eq!(lib.catalogue_marking(&done), "- 16_the_job_interview.md: The Job Interview (12 cards) [done]");
         Ok(())
     }
 

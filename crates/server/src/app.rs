@@ -9,6 +9,7 @@
 use crate::claude::{ClaudeConfig, ClaudeSession};
 use crate::instruction::Instruction;
 use crate::library::Library;
+use crate::progress::Progress;
 use crate::prompt::{VideoMode, system_prompt};
 use crate::session::{End, Incoming, Out, Session};
 use crate::stt::WhisperTranscriber;
@@ -34,8 +35,8 @@ pub struct AppState {
     pub library: Library,
     /// `None` when video mode is off (no `videos_dir`, or no usable transcripts).
     pub videos: Option<VideoLibrary>,
-    /// One line per dialog, for the tutor's prompt.
-    pub catalogue: String,
+    /// Finished dialogs and watched videos, kept between sessions.
+    pub progress: Arc<Progress>,
     /// Links that exist on some dialog card or in some video transcript, shared by all sessions.
     pub urls: Arc<std::collections::HashSet<String>>,
     pub claude: ClaudeConfig,
@@ -50,29 +51,38 @@ impl AppState {
         instruction: Instruction,
         library: Library,
         videos: Option<VideoLibrary>,
+        progress: Progress,
         claude: ClaudeConfig,
         stt: Arc<WhisperTranscriber>,
         tts: Arc<PiperSynthesizer>,
     ) -> Self {
         let slots = Arc::new(Semaphore::new(instruction.max_sessions));
-        let catalogue = library.catalogue();
         let mut urls = library.urls.clone();
         if let Some(v) = &videos {
             urls.extend(v.urls.iter().cloned());
         }
-        Self { instruction, library, videos, catalogue, urls: Arc::new(urls), claude, stt, tts, slots }
+        Self { instruction, library, videos, progress: Arc::new(progress), urls: Arc::new(urls), claude, stt, tts, slots }
     }
 
-    /// The system prompt of one session. The video queue is shuffled here, so
-    /// every session gets its own random order.
-    fn session_prompt(&self) -> String {
-        match (&self.videos, &self.instruction.videos_dir) {
+    /// The system prompt of one session and the dialog to begin with when the
+    /// learner named none: a random one they have not finished yet. The video
+    /// queue is shuffled here too and leaves out the videos already watched.
+    fn plan(&self) -> (String, Option<String>) {
+        use rand::seq::IndexedRandom;
+        let mut rng = rand::rng();
+        let done = self.progress.done_dialogs(self.library.entries.iter().map(|e| e.name.as_str()));
+        let catalogue = self.library.catalogue_marking(&done);
+        let fresh: Vec<&str> = self.library.entries.iter().map(|e| e.name.as_str()).filter(|n| !done.contains(*n)).collect();
+        let start = fresh.choose(&mut rng).map(|n| n.to_string());
+        let prompt = match (&self.videos, &self.instruction.videos_dir) {
             (Some(videos), Some(dir)) => {
-                let text = queue_text(&videos.queue(&mut rand::rng(), VIDEO_QUEUE_LEN));
-                system_prompt(&self.instruction.body, &self.catalogue, Some(VideoMode { transcripts_dir: dir, queue: &text }))
+                let seen = self.progress.seen_videos(videos.videos.iter().map(|v| v.id.as_str()));
+                let text = queue_text(&videos.queue(&mut rng, VIDEO_QUEUE_LEN, &seen));
+                system_prompt(&self.instruction.body, &catalogue, Some(VideoMode { transcripts_dir: dir, queue: &text }))
             }
-            _ => system_prompt(&self.instruction.body, &self.catalogue, None),
-        }
+            _ => system_prompt(&self.instruction.body, &catalogue, None),
+        };
+        (prompt, start)
     }
 }
 
@@ -162,6 +172,7 @@ async fn run_session(
         _ => return Err("first message must be a text hello".into()),
     };
 
+    let (prompt, start_dialog) = st.plan();
     let first_message = if video {
         if st.videos.is_none() {
             return Err("video mode is not available: set videos_dir in Instruction.md".into());
@@ -171,14 +182,17 @@ async fn run_session(
         match requested {
             Some(name) if st.library.has(&name) => format!("Begin the lesson with the dialog file {name}.md."),
             Some(name) => return Err(format!("unknown dialog {name:?}")),
-            None => "Begin the lesson.".to_string(),
+            None => match start_dialog {
+                Some(name) => format!("Begin the lesson with the dialog file {name}.md."),
+                None => "Begin the lesson.".to_string(),
+            },
         }
     };
     tracing::info!("session start (model {}, video mode {})", st.claude.model, if video { "first" } else { "on request" });
 
     // With video mode on, the tutor may also read the transcripts folder.
     let extra_dirs: Vec<std::path::PathBuf> = st.instruction.videos_dir.iter().filter(|_| st.videos.is_some()).cloned().collect();
-    let tutor = ClaudeSession::spawn(&st.claude, &st.session_prompt(), &st.instruction.dialogs_dir, &extra_dirs)
+    let tutor = ClaudeSession::spawn(&st.claude, &prompt, &st.instruction.dialogs_dir, &extra_dirs)
         .map_err(|e| format!("cannot start claude: {e}"))?;
     let mut session = Session::new(
         st.urls.clone(),
@@ -187,6 +201,7 @@ async fn run_session(
         st.tts.clone(),
         tx.clone(),
         st.instruction.correction_pause,
+        st.progress.clone(),
     );
 
     if session.begin(&first_message, st.library.entries.len()).await.is_err() {

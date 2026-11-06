@@ -2,7 +2,7 @@
 //!
 //! The tutor is told to answer only with
 //! `<say lang="en">…</say>`, `<say lang="ru">…</say>`, `<link url="…">label</link>`,
-//! `<watch url="…">title</watch>` (send the learner to watch a whole video) and the bare `<continue/>`, which ends a feedback turn: the lesson goes on by
+//! `<watch url="…">title</watch>` (send the learner to watch a whole video), `<done dialog="name"/>` (a dialog was finished) and the bare `<continue/>`, which ends a feedback turn: the lesson goes on by
 //! itself unless the learner speaks within a short window.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +26,8 @@ pub enum Segment {
     Link { url: String, label: String },
     /// "Watch this video now, the microphone stays closed until you are ready."
     Watch { url: String, label: String },
+    /// "The learner finished this dialog" (remembered between sessions).
+    Done { dialog: String },
     /// "Go on by yourself if the learner stays silent."
     Continue,
 }
@@ -44,6 +46,8 @@ pub fn parse_reply(raw: &str) -> Vec<Segment> {
             parse_link(after)
         } else if after.starts_with("<watch") {
             parse_watch(after)
+        } else if after.starts_with("<done") {
+            parse_done(after)
         } else if after.starts_with("<continue") {
             parse_continue(after)
         } else {
@@ -113,6 +117,12 @@ fn parse_watch(s: &str) -> Option<(Option<Segment>, usize)> {
     Some((Some(Segment::Watch { url, label }), consumed))
 }
 
+fn parse_done(s: &str) -> Option<(Option<Segment>, usize)> {
+    let end = s.find('>')?;
+    let dialog = attr(&s[..end], "dialog").map(|d| d.trim().trim_end_matches(".md").to_string()).filter(|d| !d.is_empty());
+    Some((dialog.map(|dialog| Segment::Done { dialog }), end + 1))
+}
+
 fn parse_continue(s: &str) -> Option<(Option<Segment>, usize)> {
     let end = s.find('>')?;
     Some((Some(Segment::Continue), end + 1))
@@ -169,7 +179,7 @@ pub fn display_text(segments: &[Segment]) -> String {
         .iter()
         .filter_map(|s| match s {
             Segment::Say { text, .. } => Some(text.as_str()),
-            Segment::Link { .. } | Segment::Watch { .. } | Segment::Continue => None,
+            Segment::Link { .. } | Segment::Watch { .. } | Segment::Done { .. } | Segment::Continue => None,
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -178,6 +188,16 @@ pub fn display_text(segments: &[Segment]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_done_tag_names_the_finished_dialog_with_or_without_the_extension() {
+        assert_eq!(
+            parse_reply("<say lang=\"en\">Well done.</say><done dialog=\"16_the_job_interview.md\"/>"),
+            vec![say(Lang::En, "Well done."), Segment::Done { dialog: "16_the_job_interview".into() }]
+        );
+        assert_eq!(parse_reply("<done dialog=\"x\"/>"), vec![Segment::Done { dialog: "x".into() }]);
+        assert!(parse_reply("<done/>").is_empty(), "no name, nothing to remember");
+    }
 
     fn say(lang: Lang, text: &str) -> Segment {
         Segment::Say { lang, text: text.into() }

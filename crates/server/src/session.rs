@@ -3,6 +3,7 @@
 
 use crate::backend::{Synthesizer, Transcriber, Tutor};
 use crate::markup::{self, Segment};
+use crate::progress::Progress;
 use protocol::{SAMPLE_RATE, ServerMsg, wav};
 use std::collections::HashSet;
 use futures_util::{Stream, StreamExt};
@@ -61,6 +62,8 @@ pub struct Session<T, S, V> {
     out: mpsc::Sender<Out>,
     /// How long the client waits for the learner after a feedback turn.
     continue_after: Duration,
+    /// Finished dialogs and watched videos are written down here.
+    progress: Arc<Progress>,
 }
 
 impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
@@ -71,8 +74,9 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         tts: Arc<V>,
         out: mpsc::Sender<Out>,
         continue_after: Duration,
+        progress: Arc<Progress>,
     ) -> Self {
-        Self { allowed_urls, tutor, stt, tts, out, continue_after }
+        Self { allowed_urls, tutor, stt, tts, out, continue_after, progress }
     }
 
     async fn emit(&self, o: Out) -> Result<(), Closed> {
@@ -157,6 +161,7 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         for segment in segments {
             match segment {
                 Segment::Continue => go_on_alone = true,
+                Segment::Done { dialog } => self.progress.dialog_done(&dialog),
                 // The voice follows the alphabet of the text, not the tag's `lang`.
                 Segment::Say { lang, text } => {
                     for (voice, part) in markup::split_by_script(lang, &text) {
@@ -176,6 +181,9 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
                 }
                 Segment::Watch { url, label } => {
                     if self.allowed_urls.contains(&url) {
+                        if let Some(id) = crate::videos::video_id(&url) {
+                            self.progress.video_seen(id);
+                        }
                         self.msg(ServerMsg::Watch { url, label }).await?;
                     } else {
                         tracing::warn!("dropping video link not present in any transcript: {url}");
@@ -248,6 +256,7 @@ mod tests {
         rx: mpsc::Receiver<Out>,
         heard: Arc<Mutex<Vec<String>>>,
         tts: Arc<FakeTts>,
+        progress: Arc<Progress>,
         url: String,
     }
 
@@ -259,8 +268,9 @@ mod tests {
         let heard = Arc::new(Mutex::new(Vec::new()));
         let tutor = FakeTutor { replies, heard: heard.clone() };
         let tts = Arc::new(FakeTts::default());
-        let session = Session::new(Arc::new(urls), tutor, Arc::new(FakeStt(stt_text)), tts.clone(), tx, Duration::from_secs(3));
-        Ok(Rig { session, rx, heard, tts, url })
+        let progress = Arc::new(Progress::in_memory());
+        let session = Session::new(Arc::new(urls), tutor, Arc::new(FakeStt(stt_text)), tts.clone(), tx, Duration::from_secs(3), progress.clone());
+        Ok(Rig { session, rx, heard, tts, progress, url })
     }
 
     fn drain(rx: &mut mpsc::Receiver<Out>) -> Vec<Out> {
@@ -355,6 +365,24 @@ mod tests {
         // An invented video address is not forwarded.
         r.session.on_text("again").await.map_err(|_| "closed")?;
         assert_eq!(kinds(&drain(&mut r.rx)), vec!["transcript", "reply", "audio", "done"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_watched_video_and_a_finished_dialog_are_written_down() -> Result<(), Box<dyn std::error::Error>> {
+        let mut r = rig(vec![], "")?;
+        let page = "https://www.youtube.com/watch?v=abc123";
+        let mut urls = (*r.session.allowed_urls).clone();
+        urls.insert(page.to_string());
+        r.session.allowed_urls = Arc::new(urls);
+        r.session.tutor.replies = vec![
+            Ok(format!("<say lang=\"en\">Watch.</say><watch url=\"{page}\">T</watch>")),
+            Ok("<say lang=\"en\">Well done.</say><done dialog=\"16_the_job_interview\"/>".into()),
+        ];
+        r.session.on_text("start").await.map_err(|_| "closed")?;
+        r.session.on_text("finished").await.map_err(|_| "closed")?;
+        assert!(r.progress.seen_videos(["abc123", "other"].into_iter()).contains("abc123"));
+        assert!(r.progress.done_dialogs(["16_the_job_interview", "other"].into_iter()).contains("16_the_job_interview"));
         Ok(())
     }
 

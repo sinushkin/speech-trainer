@@ -45,7 +45,7 @@ cargo run --release -p client -- --pause-ms 3000                # wait longer wh
 cargo run --release -p client -- --video                        # video mode: a random video, then a drill on it
 ```
 
-A short beep tells you when the microphone is open and you may speak. In video mode the
+At start the client checks the microphone (quiet, beep, say something, playback of what it heard; `--no-calibration` skips this). A short beep tells you when the microphone is open and you may speak. In video mode the
 tutor picks a random video, gives you the link, and waits (microphone off) until you have watched
 it and pressed Enter; then it drills the phrases of that video. After a correction (given in English only) the client waits a few seconds: say "In Russian" for the
 Russian version, or stay silent and the lesson goes on. Every connection gets its own Claude process (Haiku, read-only tools inside the dialogs
@@ -53,6 +53,30 @@ folder) that is stopped after the idle timeout (30 minutes). Settings: `SPEECH_T
 `SPEECH_TRAINER_CLAUDE_PROXY` (optional HTTP proxy for the claude process),
 `SPEECH_TRAINER_URL` (client), `SPEECH_TRAINER_ARECORD_DEVICE`, `SPEECH_TRAINER_APLAY_DEVICE`.
 Needs the `claude` CLI, `arecord`/`aplay` (alsa-utils), cmake and a C++ compiler to build whisper.cpp.
+
+## Voice commands
+
+You can say a command at any moment; the tutor (Claude) understands it by meaning and does it
+at once. Speech recognition is English-only, so commands are English. The full list is in
+`Instruction.md`.
+
+| Say | What happens |
+|---|---|
+| "next dialog" / "previous dialog" / "another dialog" | switch dialog (another prefers one you have not finished) |
+| "dialog about airports" / "dialog 25" | find a dialog by topic, number or name |
+| "start over" | the current dialog from its first card |
+| "next" / "skip" | next card (a skipped one gets its model answer first) |
+| "repeat" / "say it again" | repeat the question and the hint |
+| "answer" / "I don't know" | the model answer, the link and a pause, as after a normal correction |
+| "In Russian" ("po russki") | after a correction: the Russian version, then the next question |
+| "video mode" / "random video" / "another video" / "next video" | a random video to watch, then a drill on it |
+
+## Progress
+
+Finished dialogs and watched videos are saved in `~/.local/share/speech-trainer/progress.json`
+(`SPEECH_TRAINER_PROGRESS` changes the path). Without a dialog name the next session starts with a
+random dialog you have not finished, and the video queue skips videos you have watched. When
+everything is done, a new round begins. Delete the file to start from scratch.
 
 ## License
 
