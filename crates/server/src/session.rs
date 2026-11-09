@@ -1,8 +1,9 @@
 //! One learner's dialog session: turns utterances into tutor turns and the
 //! tutor's tagged reply into text, links and audio for the client.
 
+use crate::command::{self, Command};
 use crate::backend::{Synthesizer, Transcriber, Tutor};
-use crate::markup::{self, Segment};
+use crate::markup::{self, Lang, Segment};
 use crate::progress::Progress;
 use protocol::{SAMPLE_RATE, ServerMsg, wav};
 use std::collections::HashSet;
@@ -64,7 +65,14 @@ pub struct Session<T, S, V> {
     continue_after: Duration,
     /// Finished dialogs and watched videos are written down here.
     progress: Arc<Progress>,
+    /// While paused the microphone is heard but only "command resume" is acted on.
+    paused: bool,
 }
+
+/// Said and shown when the lesson is paused.
+const PAUSED_SPEECH: &str = "Paused. Say command resume when you are ready.";
+/// What the tutor is told when the learner comes back.
+const RESUME_MESSAGE: &str = "[The learner paused the lesson and is back now. Go on from where you stopped: if the current card has not been corrected yet, ask its question again with the hint; otherwise ask the next card.]";
 
 impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
     pub fn new(
@@ -76,7 +84,7 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         continue_after: Duration,
         progress: Arc<Progress>,
     ) -> Self {
-        Self { allowed_urls, tutor, stt, tts, out, continue_after, progress }
+        Self { allowed_urls, tutor, stt, tts, out, continue_after, progress, paused: false }
     }
 
     async fn emit(&self, o: Out) -> Result<(), Closed> {
@@ -123,11 +131,11 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
     pub async fn on_utterance(&mut self, pcm: &[u8]) -> Result<(), Closed> {
         let samples = wav::pcm16_from_bytes(pcm);
         if samples.len() < MIN_UTTERANCE_SAMPLES {
-            return self.msg(ServerMsg::TurnDone).await;
+            return self.nothing_to_answer().await;
         }
         let heard = self.stt.transcribe(wav::encode_pcm16_mono(&samples, SAMPLE_RATE)).await;
         match heard {
-            Ok(text) if text.trim().is_empty() => self.msg(ServerMsg::TurnDone).await,
+            Ok(text) if text.trim().is_empty() => self.nothing_to_answer().await,
             Ok(text) => self.on_text(&text).await,
             Err(e) => self.fail(format!("speech recognition failed: {e}")).await,
         }
@@ -136,7 +144,28 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
     /// Learner input that is already text (recognised or typed).
     pub async fn on_text(&mut self, text: &str) -> Result<(), Closed> {
         self.msg(ServerMsg::Transcript { text: text.to_string() }).await?;
-        self.run_turn(text).await
+        match command::parse(text, self.paused) {
+            Some(Command::Pause) => {
+                self.paused = true;
+                match self.tts.synthesize(Lang::En, PAUSED_SPEECH).await {
+                    Ok(audio) => self.emit(Out::Audio(audio)).await?,
+                    Err(e) => tracing::warn!("speech synthesis for the pause notice failed: {e}"),
+                }
+                self.msg(ServerMsg::Paused).await
+            }
+            Some(Command::Resume) if self.paused => {
+                self.paused = false;
+                self.run_turn(RESUME_MESSAGE).await
+            }
+            // "command resume" without a pause is an ordinary phrase for the tutor.
+            _ if self.paused => self.msg(ServerMsg::Paused).await,
+            _ => self.run_turn(text).await,
+        }
+    }
+
+    /// Noise or silence was heard: the microphone opens again, quietly while paused.
+    async fn nothing_to_answer(&self) -> Result<(), Closed> {
+        self.msg(if self.paused { ServerMsg::Paused } else { ServerMsg::TurnDone }).await
     }
 
     /// The learner stayed silent after feedback: the tutor moves on by itself.
@@ -291,6 +320,7 @@ mod tests {
                 Out::Msg(ServerMsg::Link { .. }) => "link",
                 Out::Msg(ServerMsg::Watch { .. }) => "watch",
                 Out::Msg(ServerMsg::TurnDone) => "done",
+                Out::Msg(ServerMsg::Paused) => "paused",
                 Out::Msg(ServerMsg::Error { .. }) => "error",
                 Out::Msg(ServerMsg::SessionEnded { .. }) => "ended",
                 Out::Msg(ServerMsg::ContinueIfSilent { .. }) => "continue-if-silent",
@@ -383,6 +413,29 @@ mod tests {
         r.session.on_text("finished").await.map_err(|_| "closed")?;
         assert!(r.progress.seen_videos(["abc123", "other"].into_iter()).contains("abc123"));
         assert!(r.progress.done_dialogs(["16_the_job_interview", "other"].into_iter()).contains("16_the_job_interview"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pause_keeps_the_tutor_out_until_command_resume() -> Result<(), Box<dyn std::error::Error>> {
+        let mut r = rig(vec![Ok("<say lang=\"en\">Welcome back.</say>".into())], "")?;
+        r.session.on_text("Command pause.").await.map_err(|_| "closed")?;
+        assert_eq!(kinds(&drain(&mut r.rx)), vec!["transcript", "audio", "paused"]);
+        // Anything else is heard but not answered, and does not beep.
+        r.session.on_text("I work around the clock").await.map_err(|_| "closed")?;
+        assert_eq!(kinds(&drain(&mut r.rx)), vec!["transcript", "paused"]);
+        assert!(r.heard.lock().map_err(|_| "poisoned")?.is_empty(), "the tutor heard nothing while paused");
+        r.session.on_text("Command resume").await.map_err(|_| "closed")?;
+        assert_eq!(kinds(&drain(&mut r.rx)), vec!["transcript", "reply", "audio", "done"]);
+        assert_eq!(r.heard.lock().map_err(|_| "poisoned")?.as_slice(), [RESUME_MESSAGE]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn without_a_pause_the_word_resume_is_just_speech() -> Result<(), Box<dyn std::error::Error>> {
+        let mut r = rig(vec![Ok("<say lang=\"en\">Ok.</say>".into())], "")?;
+        r.session.on_text("command resume").await.map_err(|_| "closed")?;
+        assert_eq!(r.heard.lock().map_err(|_| "poisoned")?.as_slice(), ["command resume"]);
         Ok(())
     }
 

@@ -33,8 +33,8 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
 
 fn show(msg: &ServerMsg, video: bool) {
     match msg {
-        ServerMsg::Ready { .. } if video => println!("== session started in video mode (say \"another video\" or \"next dialog\" to switch)"),
-        ServerMsg::Ready { dialogs } => println!("== session started ({dialogs} dialogs available; say \"next dialog\" or \"video mode\" to switch)"),
+        ServerMsg::Ready { .. } if video => println!("== session started in video mode (say \"command another video\" or \"command next dialog\" to switch)"),
+        ServerMsg::Ready { dialogs } => println!("== session started ({dialogs} dialogs available; say \"command next dialog\" or \"command video mode\" to switch)"),
         ServerMsg::Transcript { text } => println!("you:   {text}"),
         ServerMsg::Reply { text } => println!("tutor: {text}"),
         ServerMsg::Link { url, label } => println!("watch: {label}  {url}"),
@@ -45,6 +45,7 @@ fn show(msg: &ServerMsg, video: bool) {
         ServerMsg::ContinueIfSilent { after_ms } => {
             println!("(say \"in Russian\" within {:.0} s for the Russian version, or stay silent to go on)", f64::from(*after_ms) / 1000.0);
         }
+        ServerMsg::Paused => println!("(paused: say \"command resume\" or press Enter to go on)"),
         ServerMsg::TurnDone => {}
         ServerMsg::Error { message } => eprintln!("error: {message}"),
         ServerMsg::SessionEnded { reason } => println!("== session ended: {reason}"),
@@ -126,6 +127,8 @@ async fn main() -> Result<()> {
     // A video was assigned: the microphone stays closed (the video's sound would
     // be recorded) until the learner presses Enter.
     let mut awaiting_ready = false;
+    // "command pause" was said: the microphone stays on, the server answers nothing.
+    let mut paused = false;
     let mut stdin_open = true;
     // After a correction the tutor waits a moment for the learner (who may ask
     // "in Russian"); if nobody speaks it goes on by itself.
@@ -147,6 +150,17 @@ async fn main() -> Result<()> {
                             }
                             if matches!(msg, ServerMsg::Watch { .. }) {
                                 awaiting_ready = true;
+                            }
+                            if matches!(msg, ServerMsg::Paused) {
+                                // No beep: listen again for "command resume".
+                                paused = true;
+                                continue_deadline = None;
+                                silence_window = None;
+                                while mic_rx.try_recv().is_ok() {}
+                                vad.reset();
+                                listening = true;
+                            } else if matches!(msg, ServerMsg::TurnDone | ServerMsg::Error { .. }) {
+                                paused = false;
                             }
                             if matches!(msg, ServerMsg::TurnDone) && awaiting_ready {
                                 // No beep and no microphone until Enter.
@@ -208,6 +222,14 @@ async fn main() -> Result<()> {
                     stdin_open = false; // by voice the keyboard is optional
                     continue;
                 };
+                if paused {
+                    // Enter resumes; in text mode anything typed goes to the server as it is.
+                    paused = false;
+                    listening = false;
+                    let text = if line.trim().is_empty() { "command resume".to_string() } else { line };
+                    sink.send(Message::Text(serde_json::to_string(&ClientMsg::Text { text })?.into())).await?;
+                    continue;
+                }
                 if awaiting_ready {
                     awaiting_ready = false;
                     listening = false;

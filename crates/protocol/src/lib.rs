@@ -54,6 +54,9 @@ pub enum ServerMsg {
     /// learner has not started speaking `after_ms` after the audio finished,
     /// the client sends [`ClientMsg::Continue`].
     ContinueIfSilent { after_ms: u32 },
+    /// The lesson is paused: the microphone stays open but nothing is answered
+    /// until "command resume"; no beep.
+    Paused,
     /// The tutor finished this turn: all audio was sent, the mic may open again.
     TurnDone,
     Error { message: String },
@@ -100,6 +103,7 @@ mod tests {
             ServerMsg::Link { url: "https://youtu.be/x?t=1".into(), label: "x @ 0:01".into() },
             ServerMsg::ContinueIfSilent { after_ms: 3000 },
             ServerMsg::Watch { url: "https://www.youtube.com/watch?v=x".into(), label: "Title".into() },
+            ServerMsg::Paused,
             ServerMsg::TurnDone,
             ServerMsg::Error { message: "boom".into() },
             ServerMsg::SessionEnded { reason: "idle".into() },

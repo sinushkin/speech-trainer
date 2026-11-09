@@ -57,8 +57,9 @@ Needs the `claude` CLI, `arecord`/`aplay` (alsa-utils), cmake and a C++ compiler
 ## Voice commands
 
 You can say a command at any moment; the tutor (Claude) understands it by meaning and does it
-at once. Speech recognition is English-only, so commands are English. The full list is in
-`Instruction.md`.
+at once. **Every command starts with the word "command"** ("command next dialog"); the same words
+without it are treated as your answer. Speech recognition is English-only, so commands are English.
+The full list is in `Instruction.md`. The table gives the words after "command".
 
 | Say | What happens |
 |---|---|
@@ -68,7 +69,8 @@ at once. Speech recognition is English-only, so commands are English. The full l
 | "next" / "skip" | next card (a skipped one gets its model answer first) |
 | "repeat" / "say it again" | repeat the question and the hint |
 | "answer" / "I don't know" | the model answer, the link and a pause, as after a normal correction |
-| "In Russian" ("po russki") | after a correction: the Russian version, then the next question |
+| "pause" / "resume" | pause the lesson: the microphone stays on but nothing is answered (no beep) until "command resume" (or Enter) |
+| "In Russian" ("po russki"), no prefix needed | after a correction: the Russian version, then the next question |
 | "video mode" / "random video" / "another video" / "next video" | a random video to watch, then a drill on it |
 
 ## Progress

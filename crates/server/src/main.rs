@@ -3,6 +3,7 @@ mod app;
 mod audio_loop;
 mod backend;
 mod claude;
+mod command;
 mod dialog;
 mod instruction;
 mod library;
