@@ -5,18 +5,41 @@ pub const DEFAULT_PAUSE_MS: u32 = 2000;
 pub const DEFAULT_MAX_UTTERANCE_SEC: u32 = 30;
 
 pub const USAGE: &str = concat!(
+    "speech-trainer client: speak English with a tutor; it listens, answers by voice and corrects you.\n",
+    "\n",
     "usage: client [dialog-name | --video] [--text] [--no-calibration] [--pause-ms N] [--max-utterance-sec N]\n",
-    "  dialog-name            dialog to start with; without it the tutor chooses,\n",
-    "                         and you can ask it to switch\n",
-    "  --video                video mode: the tutor picks a random video and gives you the link;\n",
-    "                         watch it on YouTube, press Enter, and the training on it starts\n",
+    "\n",
+    "options:\n",
+    "  dialog-name            dialog to start with; without it the server picks a random dialog\n",
+    "                         you have not finished yet\n",
+    "  --video                video mode: the tutor picks a random unwatched video and gives you the\n",
+    "                         link; watch it on YouTube, press Enter, and the training on it starts\n",
     "  --text                 type your answers instead of speaking (no microphone needed);\n",
     "                         the line /continue acts as the silence window after a correction\n",
     "  --no-calibration       skip the microphone check at start (quiet, then say something)\n",
     "  --pause-ms N           silence that ends your answer, in milliseconds (default 2000,\n",
     "                         env SPEECH_TRAINER_PAUSE_MS); raise it if you need time to think\n",
     "  --max-utterance-sec N  longest single answer in seconds (default 30,\n",
-    "                         env SPEECH_TRAINER_MAX_UTTERANCE_SEC)",
+    "                         env SPEECH_TRAINER_MAX_UTTERANCE_SEC)\n",
+    "  -h, --help             this text\n",
+    "\n",
+    "environment:\n",
+    "  SPEECH_TRAINER_URL             server address (default ws://127.0.0.1:8765/ws)\n",
+    "  SPEECH_TRAINER_ARECORD_DEVICE  microphone device for arecord (default: system default)\n",
+    "  SPEECH_TRAINER_APLAY_DEVICE    speaker device for aplay (default: system default)\n",
+    "\n",
+    "while the lesson runs:\n",
+    "  A beep means the microphone is open and you may speak. Enter after a video link starts the\n",
+    "  training; Enter on a pause resumes the lesson.\n",
+    "  After a correction (in English) say \"in Russian\" within a few seconds for the Russian version,\n",
+    "  or stay silent and the lesson goes on.\n",
+    "  Every command starts with the word \"command\" (anything else is taken as your answer):\n",
+    "    command next dialog | previous dialog | another dialog | dialog about <topic> | dialog <number>\n",
+    "    command start over | next | skip | repeat | answer\n",
+    "    command video mode | random video | another video | next video\n",
+    "    command pause / command resume   pause the lesson (the microphone stays on, nothing is answered)\n",
+    "  Progress (finished dialogs, watched videos) is kept on the server in\n",
+    "  ~/.local/share/speech-trainer/progress.json.",
 );
 
 #[derive(Debug, PartialEq, Eq)]
@@ -163,6 +186,17 @@ mod tests {
     fn calibration_can_be_switched_off() -> Result<(), String> {
         assert!(!args(run(&["--no-calibration"], &[]))?.calibrate);
         Ok(())
+    }
+
+    #[test]
+    fn the_help_text_mentions_every_option_and_variable() {
+        for needle in [
+            "--video", "--text", "--no-calibration", "--pause-ms", "--max-utterance-sec", "--help",
+            "SPEECH_TRAINER_URL", "SPEECH_TRAINER_PAUSE_MS", "SPEECH_TRAINER_MAX_UTTERANCE_SEC",
+            "SPEECH_TRAINER_ARECORD_DEVICE", "SPEECH_TRAINER_APLAY_DEVICE", "command pause", "in Russian",
+        ] {
+            assert!(USAGE.contains(needle), "the help text does not mention {needle}");
+        }
     }
 
     #[test]
