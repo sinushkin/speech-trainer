@@ -4,6 +4,7 @@
 use crate::command::{self, Command};
 use crate::backend::{Synthesizer, Transcriber, Tutor};
 use crate::markup::{self, Lang, Segment};
+use crate::phrasebook::{self, Phrasebook};
 use crate::progress::Progress;
 use protocol::{SAMPLE_RATE, ServerMsg, wav};
 use std::collections::HashSet;
@@ -54,6 +55,15 @@ pub enum End {
     Invalid(String),
 }
 
+/// What the learner has done, written down for later sessions.
+#[derive(Clone)]
+pub struct Memory {
+    /// Finished dialogs and watched videos.
+    pub progress: Arc<Progress>,
+    /// Phrases the learner missed, for spaced repetition.
+    pub phrasebook: Arc<Phrasebook>,
+}
+
 pub struct Session<T, S, V> {
     /// Video links that exist on some card; any other link in a reply is dropped.
     allowed_urls: Arc<HashSet<String>>,
@@ -63,8 +73,7 @@ pub struct Session<T, S, V> {
     out: mpsc::Sender<Out>,
     /// How long the client waits for the learner after a feedback turn.
     continue_after: Duration,
-    /// Finished dialogs and watched videos are written down here.
-    progress: Arc<Progress>,
+    memory: Memory,
     /// While paused the microphone is heard but only "command resume" is acted on.
     paused: bool,
 }
@@ -82,9 +91,9 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         tts: Arc<V>,
         out: mpsc::Sender<Out>,
         continue_after: Duration,
-        progress: Arc<Progress>,
+        memory: Memory,
     ) -> Self {
-        Self { allowed_urls, tutor, stt, tts, out, continue_after, progress, paused: false }
+        Self { allowed_urls, tutor, stt, tts, out, continue_after, memory, paused: false }
     }
 
     async fn emit(&self, o: Out) -> Result<(), Closed> {
@@ -200,7 +209,20 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         for segment in segments {
             match segment {
                 Segment::Continue => go_on_alone = true,
-                Segment::Done { dialog } => self.progress.dialog_done(&dialog),
+                Segment::Done { dialog } => self.memory.progress.dialog_done(&dialog),
+                Segment::Missed(mut missed) => {
+                    // A link the tutor made up is not kept.
+                    if !missed.url.is_empty() && !self.allowed_urls.contains(&missed.url) {
+                        tracing::warn!("dropping unknown link of a missed phrase: {}", missed.url);
+                        missed.url.clear();
+                    }
+                    tracing::info!("phrase missed: {}", missed.phrase);
+                    self.memory.phrasebook.record_miss(&missed, phrasebook::today());
+                }
+                Segment::Passed { phrase } => {
+                    tracing::info!("phrase passed: {phrase}");
+                    self.memory.phrasebook.record_pass(&phrase, phrasebook::today());
+                }
                 // The voice follows the alphabet of the text, not the tag's `lang`.
                 Segment::Say { lang, text } => {
                     for (voice, part) in markup::split_by_script(lang, &text) {
@@ -221,7 +243,7 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
                 Segment::Watch { url, label } => {
                     if self.allowed_urls.contains(&url) {
                         if let Some(id) = crate::videos::video_id(&url) {
-                            self.progress.video_seen(id);
+                            self.memory.progress.video_seen(id);
                         }
                         self.msg(ServerMsg::Watch { url, label }).await?;
                     } else {
@@ -297,6 +319,7 @@ mod tests {
         heard: Arc<Mutex<Vec<String>>>,
         tts: Arc<FakeTts>,
         progress: Arc<Progress>,
+        phrasebook: Arc<Phrasebook>,
         url: String,
     }
 
@@ -309,8 +332,9 @@ mod tests {
         let tutor = FakeTutor { replies, heard: heard.clone() };
         let tts = Arc::new(FakeTts::default());
         let progress = Arc::new(Progress::in_memory());
-        let session = Session::new(Arc::new(urls), tutor, Arc::new(FakeStt(stt_text)), tts.clone(), tx, Duration::from_secs(3), progress.clone());
-        Ok(Rig { session, rx, heard, tts, progress, url })
+        let phrasebook = Arc::new(Phrasebook::in_memory());
+        let session = Session::new(Arc::new(urls), tutor, Arc::new(FakeStt(stt_text)), tts.clone(), tx, Duration::from_secs(3), Memory { progress: progress.clone(), phrasebook: phrasebook.clone() });
+        Ok(Rig { session, rx, heard, tts, progress, phrasebook, url })
     }
 
     fn drain(rx: &mut mpsc::Receiver<Out>) -> Vec<Out> {
@@ -447,6 +471,27 @@ mod tests {
         let mut r = rig(vec![Ok("<say lang=\"en\">Ok.</say>".into())], "")?;
         r.session.on_text("command resume").await.map_err(|_| "closed")?;
         assert_eq!(r.heard.lock().map_err(|_| "poisoned")?.as_slice(), ["command resume"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missed_phrases_go_to_the_phrasebook_with_only_a_real_link_and_passed_ones_move_up() -> Result<(), Box<dyn std::error::Error>> {
+        let mut r = rig(vec![], "")?;
+        let real = r.url.clone();
+        r.session.tutor.replies = vec![
+            Ok(format!("<say lang=\"en\">Not quite.</say><missed phrase=\"around the clock\" hint=\"круглосуточно\" answer=\"We work around the clock.\" source=\"16\" url=\"{real}\"/><continue/>")),
+            Ok("<say lang=\"en\">Not quite.</say><missed phrase=\"cut corners\" hint=\"h\" answer=\"a\" source=\"16\" url=\"https://youtu.be/invented?t=1\"/>".into()),
+            Ok("<say lang=\"en\">Good.</say><passed phrase=\"around the clock\"/><passed phrase=\"never missed\"/>".into()),
+        ];
+        for _ in 0..3 {
+            r.session.on_text("x").await.map_err(|_| "closed")?;
+        }
+        assert_eq!(r.phrasebook.len(), 2, "the unknown phrase was not added by a pass");
+        let all = r.phrasebook.due(phrasebook::today() + 1000, 10);
+        let clock = all.iter().find(|x| x.phrase == "around the clock").ok_or("missing")?;
+        let corners = all.iter().find(|x| x.phrase == "cut corners").ok_or("missing")?;
+        assert_eq!((clock.level, clock.url.as_str()), (1, real.as_str()));
+        assert_eq!(corners.url, "", "an invented link is dropped");
         Ok(())
     }
 

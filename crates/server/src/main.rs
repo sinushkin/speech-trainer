@@ -9,6 +9,7 @@ mod instruction;
 mod library;
 mod markup;
 mod progress;
+mod phrasebook;
 mod prompt;
 mod session;
 mod stt;
@@ -23,7 +24,7 @@ const USAGE: &str = "usage: server --instruction <Instruction.md>\n\
     The instruction file says where the dialogs are, what is learned and how long sessions live;\n\
     see Instruction.md in the repository root. SPEECH_TRAINER_INSTRUCTION can replace the argument.\n\
     Other settings (environment): SPEECH_TRAINER_BIND, SPEECH_TRAINER_MODEL, SPEECH_TRAINER_PIPER,\n\
-    SPEECH_TRAINER_VOICES, SPEECH_TRAINER_CLAUDE_BIN, SPEECH_TRAINER_CLAUDE_MODEL, SPEECH_TRAINER_CLAUDE_PROXY, SPEECH_TRAINER_PROGRESS (default ~/.local/share/speech-trainer/progress.json)";
+    SPEECH_TRAINER_VOICES, SPEECH_TRAINER_CLAUDE_BIN, SPEECH_TRAINER_CLAUDE_MODEL, SPEECH_TRAINER_CLAUDE_PROXY, SPEECH_TRAINER_PHRASES (default ~/.local/share/speech-trainer/phrases.csv), SPEECH_TRAINER_PROGRESS (default ~/.local/share/speech-trainer/progress.json)";
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -100,11 +101,16 @@ async fn main() -> Result<()> {
         tracing::info!("progress file: {}", p.display());
     }
     let progress = progress_path.map_or_else(progress::Progress::in_memory, |p| progress::Progress::load(&p));
+    let phrasebook_path = phrasebook::default_path(env);
+    if let Some(p) = &phrasebook_path {
+        tracing::info!("phrasebook: {}", p.display());
+    }
+    let phrasebook = phrasebook_path.map_or_else(phrasebook::Phrasebook::in_memory, |p| phrasebook::Phrasebook::load(&p));
     let state = Arc::new(app::AppState::new(
         instruction,
         library,
         videos,
-        progress,
+        session::Memory { progress: Arc::new(progress), phrasebook: Arc::new(phrasebook) },
         claude,
         Arc::new(stt::WhisperTranscriber::load(&model, "en").context("cannot load the speech recognition model")?),
         Arc::new(tts::PiperSynthesizer::start(&tts::PiperConfig::from_env())),

@@ -9,9 +9,9 @@
 use crate::claude::{ClaudeConfig, ClaudeSession};
 use crate::instruction::Instruction;
 use crate::library::Library;
-use crate::progress::Progress;
-use crate::prompt::{VideoMode, system_prompt};
-use crate::session::{End, Incoming, Out, Session};
+use crate::phrasebook;
+use crate::prompt::{Review, VideoMode, system_prompt};
+use crate::session::{End, Incoming, Memory, Out, Session};
 use crate::stt::WhisperTranscriber;
 use crate::tts::PiperSynthesizer;
 use crate::videos::{VideoLibrary, queue_text};
@@ -27,6 +27,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc};
 
+/// How many due phrases one review round takes.
+const REVIEW_LEN: usize = 10;
+
 /// How many videos are put in a session's random queue.
 const VIDEO_QUEUE_LEN: usize = 30;
 
@@ -35,8 +38,8 @@ pub struct AppState {
     pub library: Library,
     /// `None` when video mode is off (no `videos_dir`, or no usable transcripts).
     pub videos: Option<VideoLibrary>,
-    /// Finished dialogs and watched videos, kept between sessions.
-    pub progress: Arc<Progress>,
+    /// Finished dialogs, watched videos and missed phrases, kept between sessions.
+    pub memory: Memory,
     /// Links that exist on some dialog card or in some video transcript, shared by all sessions.
     pub urls: Arc<std::collections::HashSet<String>>,
     pub claude: ClaudeConfig,
@@ -51,7 +54,7 @@ impl AppState {
         instruction: Instruction,
         library: Library,
         videos: Option<VideoLibrary>,
-        progress: Progress,
+        memory: Memory,
         claude: ClaudeConfig,
         stt: Arc<WhisperTranscriber>,
         tts: Arc<PiperSynthesizer>,
@@ -61,7 +64,7 @@ impl AppState {
         if let Some(v) = &videos {
             urls.extend(v.urls.iter().cloned());
         }
-        Self { instruction, library, videos, progress: Arc::new(progress), urls: Arc::new(urls), claude, stt, tts, slots }
+        Self { instruction, library, videos, memory, urls: Arc::new(urls), claude, stt, tts, slots }
     }
 
     /// The system prompt of one session and the dialog to begin with when the
@@ -70,17 +73,21 @@ impl AppState {
     fn plan(&self) -> (String, Option<String>) {
         use rand::seq::IndexedRandom;
         let mut rng = rand::rng();
-        let done = self.progress.done_dialogs(self.library.entries.iter().map(|e| e.name.as_str()));
+        let done = self.memory.progress.done_dialogs(self.library.entries.iter().map(|e| e.name.as_str()));
         let catalogue = self.library.catalogue_marking(&done);
         let fresh: Vec<&str> = self.library.entries.iter().map(|e| e.name.as_str()).filter(|n| !done.contains(*n)).collect();
         let start = fresh.choose(&mut rng).map(|n| n.to_string());
+        let today = phrasebook::today();
+        let due = self.memory.phrasebook.due(today, REVIEW_LEN);
+        let review_list = phrasebook::review_text(&due);
+        let review = (!due.is_empty()).then(|| Review { total: self.memory.phrasebook.due_count(today), list: &review_list });
         let prompt = match (&self.videos, &self.instruction.videos_dir) {
             (Some(videos), Some(dir)) => {
-                let seen = self.progress.seen_videos(videos.videos.iter().map(|v| v.id.as_str()));
+                let seen = self.memory.progress.seen_videos(videos.videos.iter().map(|v| v.id.as_str()));
                 let text = queue_text(&videos.queue(&mut rng, VIDEO_QUEUE_LEN, &seen));
-                system_prompt(&self.instruction.body, &catalogue, Some(VideoMode { transcripts_dir: dir, queue: &text }))
+                system_prompt(&self.instruction.body, &catalogue, Some(VideoMode { transcripts_dir: dir, queue: &text }), review)
             }
-            _ => system_prompt(&self.instruction.body, &catalogue, None),
+            _ => system_prompt(&self.instruction.body, &catalogue, None, review),
         };
         (prompt, start)
     }
@@ -163,17 +170,23 @@ async fn run_session(
     let first = tokio::time::timeout(Duration::from_secs(30), stream.next())
         .await
         .map_err(|_| "no hello message within 30 s".to_string())?;
-    let (requested, video) = match first {
+    let (requested, video, review) = match first {
         Some(Ok(Message::Text(t))) => match serde_json::from_str::<ClientMsg>(&t) {
-            Ok(ClientMsg::Hello { dialog, video }) => (dialog, video),
+            Ok(ClientMsg::Hello { dialog, video, review }) => (dialog, video, review),
             Ok(_) => return Err("first message must be hello".into()),
             Err(e) => return Err(format!("bad hello: {e}")),
         },
         _ => return Err("first message must be a text hello".into()),
     };
 
+    if review && st.memory.phrasebook.due_count(phrasebook::today()) == 0 {
+        notify(tx, ServerMsg::SessionEnded { reason: format!("nothing to review: no phrases are due ({} in the phrasebook)", st.memory.phrasebook.len()) }).await;
+        return Ok(());
+    }
     let (prompt, start_dialog) = st.plan();
-    let first_message = if video {
+    let first_message = if review {
+        "Begin a review lesson.".to_string()
+    } else if video {
         if st.videos.is_none() {
             return Err("video mode is not available: set videos_dir in Instruction.md".into());
         }
@@ -201,7 +214,7 @@ async fn run_session(
         st.tts.clone(),
         tx.clone(),
         st.instruction.correction_pause,
-        st.progress.clone(),
+        st.memory.clone(),
     );
 
     if session.begin(&first_message, st.library.entries.len()).await.is_err() {

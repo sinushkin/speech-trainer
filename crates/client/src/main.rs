@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
 
     let (ws, _) = tokio_tungstenite::connect_async(&url).await.with_context(|| format!("cannot connect to {url}"))?;
     let (mut sink, mut stream) = ws.split();
-    let hello = serde_json::to_string(&ClientMsg::Hello { dialog, video: args.video })?;
+    let hello = serde_json::to_string(&ClientMsg::Hello { dialog, video: args.video, review: args.review })?;
     sink.send(Message::Text(hello.into())).await?;
 
     let mut listening = false; // false until the tutor's first turn is done

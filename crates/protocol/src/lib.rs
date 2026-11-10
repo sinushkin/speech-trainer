@@ -27,6 +27,9 @@ pub enum ClientMsg {
         /// it, and drills the phrases of that video after the learner has watched it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         video: bool,
+        /// Start with a review of the phrases the learner missed earlier.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        review: bool,
     },
     /// Typed input that bypasses speech recognition (development and tests).
     Text { text: String },
@@ -72,7 +75,7 @@ mod tests {
 
     #[test]
     fn client_messages_round_trip_as_tagged_json() -> Result<(), serde_json::Error> {
-        let msg = ClientMsg::Hello { dialog: Some("16_the_job_interview".into()), video: false };
+        let msg = ClientMsg::Hello { dialog: Some("16_the_job_interview".into()), video: false, review: false };
         let json = serde_json::to_string(&msg)?;
         assert_eq!(json, r#"{"type":"hello","dialog":"16_the_job_interview"}"#);
         assert_eq!(serde_json::from_str::<ClientMsg>(&json)?, msg);
@@ -88,11 +91,19 @@ mod tests {
 
     #[test]
     fn hello_without_a_dialog_is_valid() -> Result<(), serde_json::Error> {
-        assert_eq!(serde_json::from_str::<ClientMsg>(r#"{"type":"hello"}"#)?, ClientMsg::Hello { dialog: None, video: false });
-        assert_eq!(serde_json::to_string(&ClientMsg::Hello { dialog: None, video: false })?, r#"{"type":"hello"}"#);
-        let video = ClientMsg::Hello { dialog: None, video: true };
+        assert_eq!(serde_json::from_str::<ClientMsg>(r#"{"type":"hello"}"#)?, ClientMsg::Hello { dialog: None, video: false, review: false });
+        assert_eq!(serde_json::to_string(&ClientMsg::Hello { dialog: None, video: false, review: false })?, r#"{"type":"hello"}"#);
+        let video = ClientMsg::Hello { dialog: None, video: true, review: false };
         assert_eq!(serde_json::to_string(&video)?, r#"{"type":"hello","video":true}"#);
         assert_eq!(serde_json::from_str::<ClientMsg>(r#"{"type":"hello","video":true}"#)?, video);
+        Ok(())
+    }
+
+    #[test]
+    fn hello_can_ask_for_a_review() -> Result<(), serde_json::Error> {
+        let review = ClientMsg::Hello { dialog: None, video: false, review: true };
+        assert_eq!(serde_json::to_string(&review)?, r#"{"type":"hello","review":true}"#);
+        assert_eq!(serde_json::from_str::<ClientMsg>(r#"{"type":"hello","review":true}"#)?, review);
         Ok(())
     }
 

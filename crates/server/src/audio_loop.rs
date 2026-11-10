@@ -154,7 +154,7 @@ async fn mixed_russian_english_phrase_goes_through_the_whole_audio_loop() -> Tes
     let dialog = crate::dialog::parse(include_str!("../tests/fixtures/16_the_job_interview.md"))?;
     let (tx, mut rx) = mpsc::channel(64);
     let urls = dialog.cards.iter().map(|c| c.url.clone()).collect();
-    let mut session = Session::new(Arc::new(urls), tutor, stt, Arc::new(tts), tx, std::time::Duration::from_secs(3), Arc::new(crate::progress::Progress::in_memory()));
+    let mut session = Session::new(Arc::new(urls), tutor, stt, Arc::new(tts), tx, std::time::Duration::from_secs(3), crate::session::Memory { progress: Arc::new(crate::progress::Progress::in_memory()), phrasebook: Arc::new(crate::phrasebook::Phrasebook::in_memory()) });
     session.on_utterance(&pcm).await.map_err(|_| "session closed")?;
     drop(session);
 

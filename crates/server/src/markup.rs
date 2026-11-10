@@ -5,6 +5,8 @@
 //! `<watch url="…">title</watch>` (send the learner to watch a whole video), `<done dialog="name"/>` (a dialog was finished) and the bare `<continue/>`, which ends a feedback turn: the lesson goes on by
 //! itself unless the learner speaks within a short window.
 
+use crate::phrasebook::Missed;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     En,
@@ -28,6 +30,10 @@ pub enum Segment {
     Watch { url: String, label: String },
     /// "The learner finished this dialog" (remembered between sessions).
     Done { dialog: String },
+    /// "The learner did not manage this phrase": goes into the phrasebook.
+    Missed(Missed),
+    /// "The learner managed this phrase of the phrasebook."
+    Passed { phrase: String },
     /// "Go on by yourself if the learner stays silent."
     Continue,
 }
@@ -46,6 +52,10 @@ pub fn parse_reply(raw: &str) -> Vec<Segment> {
             parse_link(after)
         } else if after.starts_with("<watch") {
             parse_watch(after)
+        } else if after.starts_with("<missed") {
+            parse_missed(after)
+        } else if after.starts_with("<passed") {
+            parse_passed(after)
         } else if after.starts_with("<done") {
             parse_done(after)
         } else if after.starts_with("<continue") {
@@ -117,6 +127,31 @@ fn parse_watch(s: &str) -> Option<(Option<Segment>, usize)> {
     Some((Some(Segment::Watch { url, label }), consumed))
 }
 
+/// End of a self-closing tag: `/>`, or a plain `>` from a sloppy writer.
+fn tag_end(s: &str) -> Option<(usize, usize)> {
+    match (s.find("/>"), s.find('>')) {
+        (Some(slash), Some(gt)) if slash + 1 == gt => Some((slash, gt + 1)),
+        (_, Some(gt)) => Some((gt, gt + 1)),
+        _ => None,
+    }
+}
+
+fn parse_missed(s: &str) -> Option<(Option<Segment>, usize)> {
+    let (inner_end, consumed) = tag_end(s)?;
+    let open = &s[..inner_end];
+    let get = |name: &str| attr(open, name).unwrap_or("").trim().to_string();
+    let phrase = get("phrase");
+    let seg = (!phrase.is_empty())
+        .then(|| Segment::Missed(Missed { phrase, hint_ru: get("hint"), model_answer: get("answer"), source: get("source"), url: get("url") }));
+    Some((seg, consumed))
+}
+
+fn parse_passed(s: &str) -> Option<(Option<Segment>, usize)> {
+    let (inner_end, consumed) = tag_end(s)?;
+    let phrase = attr(&s[..inner_end], "phrase").unwrap_or("").trim().to_string();
+    Some(((!phrase.is_empty()).then_some(Segment::Passed { phrase }), consumed))
+}
+
 fn parse_done(s: &str) -> Option<(Option<Segment>, usize)> {
     let end = s.find('>')?;
     let dialog = attr(&s[..end], "dialog").map(|d| d.trim().trim_end_matches(".md").to_string()).filter(|d| !d.is_empty());
@@ -179,7 +214,7 @@ pub fn display_text(segments: &[Segment]) -> String {
         .iter()
         .filter_map(|s| match s {
             Segment::Say { text, .. } => Some(text.as_str()),
-            Segment::Link { .. } | Segment::Watch { .. } | Segment::Done { .. } | Segment::Continue => None,
+            Segment::Link { .. } | Segment::Watch { .. } | Segment::Done { .. } | Segment::Missed(_) | Segment::Passed { .. } | Segment::Continue => None,
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -188,6 +223,29 @@ pub fn display_text(segments: &[Segment]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missed_and_passed_tags_carry_the_phrase_and_are_not_spoken() {
+        let raw = "<say lang=\"en\">Not quite.</say><missed phrase=\"around the clock\" hint=\"работать круглосуточно\" answer=\"We work around the clock.\" source=\"16_the_job_interview\" url=\"https://youtu.be/x?t=5\"/><passed phrase=\"get on my nerves\"/><continue/>";
+        let segs = parse_reply(raw);
+        assert_eq!(
+            segs,
+            vec![
+                say(Lang::En, "Not quite."),
+                Segment::Missed(Missed {
+                    phrase: "around the clock".into(),
+                    hint_ru: "работать круглосуточно".into(),
+                    model_answer: "We work around the clock.".into(),
+                    source: "16_the_job_interview".into(),
+                    url: "https://youtu.be/x?t=5".into(),
+                }),
+                Segment::Passed { phrase: "get on my nerves".into() },
+                Segment::Continue,
+            ]
+        );
+        assert_eq!(display_text(&segs), "Not quite.");
+        assert!(parse_reply("<missed hint=\"x\"/>").is_empty(), "no phrase, nothing to keep");
+    }
 
     #[test]
     fn a_done_tag_names_the_finished_dialog_with_or_without_the_extension() {

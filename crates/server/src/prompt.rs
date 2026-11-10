@@ -28,6 +28,10 @@ Starting: if the first system message says "Begin a video lesson.", start video 
 
 Progress: a CATALOGUE line ending in [done] is a dialog the learner has already finished in an earlier session. When the learner asks for another or the next dialog without naming one, take a dialog that is not marked [done] (the next one in the CATALOGUE after the current one); go back to a [done] dialog only when asked for it by name or when none is left. When you finish the last card of a dialog (right after the congratulation), add <done dialog="NAME"/> with the file name without ".md"; this is how the system remembers it. Do not add it for a dialog that was left unfinished.
 
+Phrasebook: the system keeps a phrasebook of the phrases the learner did not manage, and brings them back later (spaced repetition). Report them. In a FEEDBACK turn, when the learner did NOT manage the phrase (said something else, used the phrase wrongly, asked for the answer, said they don't know, or skipped the card), add the tag <missed phrase="the English phrase" hint="the Russian hint" answer="the model answer" source="the dialog file name without .md, or the video id" url="the item's link URL, or empty"/> to that turn. Inside the attributes use single quotes only, never double quotes. When the learner managed the phrase in a normal lesson, add nothing. Report each card at most once.
+
+Review lesson: the REVIEW section at the end lists phrases that are due for review, the weakest first. When the first system message says "Begin a review lesson." (or the learner says "command review"), drill exactly those phrases in the listed order, one at a time, as cards: QUESTION turn (one short English sentence such as "Say this in English." plus the item's Russian hint; never say the phrase), FEEDBACK turn in English only ending with <continue/>, RUSSIAN turn on request, NEXT turn. The model answer is the item's model answer. If the item has a link, give it after the feedback as <link url="LINK">source</link>. In the FEEDBACK turn add <passed phrase="THE PHRASE EXACTLY AS LISTED"/> when the learner used the phrase well, or <missed .../> as above when not (the phrase is then repeated in a later review). After the last item, say in one sentence how it went and offer to go on with a dialog or a video. If nothing is due, say so in one English sentence and offer a dialog. When the review list is not empty and this is a normal lesson, mention once in your greeting, in one short English sentence, how many phrases are waiting and that the learner can say "command review".
+
 Learner commands: at any moment the learner may give a command (switch to another dialog, skip a card, repeat, ask for the answer, restart, video mode); the LESSON INSTRUCTION below lists them. EVERY command starts with the word "command" ("command next dialog", "command skip"). Words without that prefix are an answer to your question, even when they sound like a command: for example "next" or "repeat" alone are just the learner's words, to be corrected like any answer. (Exception: asking for Russian after a correction, see the RUSSIAN turn, works with or without the prefix.) The prefix is part of the speech, so the command can arrive as "Command, next dialog." Pausing ("command pause" and "command resume") is handled by the system, you never see it. Commands arrive from speech recognition (English only, so any Russian word comes out garbled), so go by the meaning, not the exact words. Obey a command at once, without asking for confirmation. For a dialog command, find the dialog in the CATALOGUE (or search the folder with Grep when the CATALOGUE does not obviously match), Read its file, say in a few words which dialog you are switching to, and start with its first card. After a command, finish with a QUESTION turn (no <continue/>) for the card you land on; a request for the answer is the exception, it is a FEEDBACK turn with the model answer. Never invent dialogs or cards. If the learner says they don't know, treat it as a request for the answer.
 
 The learner's words come from speech recognition and may contain recognition mistakes; do not blame the learner for obvious ones.
@@ -42,8 +46,10 @@ OUTPUT FORMAT (mandatory, nothing outside these tags):
 <link url="URL COPIED EXACTLY FROM THE CARD">LABEL FROM THE CARD</link>
 <watch url="VIDEO URL FROM THE QUEUE">VIDEO TITLE</watch>
 <done dialog="DIALOG FILE NAME WITHOUT .md"/>
+<missed phrase="…" hint="…" answer="…" source="…" url="…"/>
+<passed phrase="…"/>
 <continue/>
-Use several <say> tags per turn when you switch language. Never put English phrases inside a Russian <say>; switch to an English <say> instead. Use the <link> tag only once per card, right after the feedback for that card, with the card's own URL and label. <watch> is used only in a WATCH turn, nowhere else. <done/> is used only once, after the last card of a dialog. <continue/> has no content and is used only at the end of a FEEDBACK turn. Do not mention tools, files or folders to the learner.
+Use several <say> tags per turn when you switch language. Never put English phrases inside a Russian <say>; switch to an English <say> instead. Use the <link> tag only once per card, right after the feedback for that card, with the card's own URL and label. <watch> is used only in a WATCH turn, nowhere else. <done/> is used only once, after the last card of a dialog. <missed/> and <passed/> go only into FEEDBACK turns and are never spoken. <continue/> has no content and is used only at the end of a FEEDBACK turn. Do not mention tools, files or folders to the learner.
 
 The first message from the system will be "Begin the lesson." (possibly naming a dialog); answer it with a short greeting and the first card."###;
 
@@ -55,12 +61,22 @@ pub struct VideoMode<'a> {
     pub queue: &'a str,
 }
 
-pub fn system_prompt(instruction: &str, catalogue: &str, videos: Option<VideoMode<'_>>) -> String {
+/// The phrases due for review (see `phrasebook::review_text`); `total` is how many are due in all.
+pub struct Review<'a> {
+    pub total: usize,
+    pub list: &'a str,
+}
+
+pub fn system_prompt(instruction: &str, catalogue: &str, videos: Option<VideoMode<'_>>, review: Option<Review<'_>>) -> String {
+    let review = match review {
+        Some(r) => format!("REVIEW LIST ({} phrases are due; the weakest are listed first):\n{}", r.total, r.list),
+        None => "REVIEW LIST: no phrases are due for review.".to_string(),
+    };
     let videos = match videos {
         Some(v) => format!("VIDEOS folder (transcripts, Read works there): {}\nVIDEO QUEUE (random order for this session):\n{}", v.transcripts_dir.display(), v.queue),
         None => "VIDEO MODE is not available here (no VIDEOS folder is configured). If the learner asks for it, say so in one short English sentence and carry on with the dialogs.".to_string(),
     };
-    format!("{RULES}\n\nLESSON INSTRUCTION (from the operator, follow it):\n{instruction}\n\nCATALOGUE of dialogs:\n{catalogue}\n\n{videos}\n")
+    format!("{RULES}\n\nLESSON INSTRUCTION (from the operator, follow it):\n{instruction}\n\nCATALOGUE of dialogs:\n{catalogue}\n\n{videos}\n\n{review}\n")
 }
 
 #[cfg(test)]
@@ -69,7 +85,7 @@ mod tests {
 
     #[test]
     fn prompt_has_rules_instruction_and_catalogue() {
-        let p = system_prompt("Teach idioms. UNIQUE-INSTRUCTION-MARKER", "- 16_the_job_interview.md: The Job Interview (12 cards)", None);
+        let p = system_prompt("Teach idioms. UNIQUE-INSTRUCTION-MARKER", "- 16_the_job_interview.md: The Job Interview (12 cards)", None, None);
         assert!(p.contains("OUTPUT FORMAT"));
         assert!(p.contains("Read, Glob and Grep"));
         assert!(p.contains("ENGLISH ONLY"));
@@ -79,11 +95,20 @@ mod tests {
         assert!(p.contains("EVERY command starts with the word \"command\""));
         assert!(p.contains("<done dialog="), "the tutor is told how to report a finished dialog");
         assert!(p.contains("[done]"));
+        assert!(p.contains("<missed phrase="), "the tutor is told how to report a missed phrase");
+        assert!(p.contains("REVIEW LIST: no phrases are due"));
         assert!(p.contains("po russki"));
         assert!(p.contains("UNIQUE-INSTRUCTION-MARKER"));
         assert!(p.contains("16_the_job_interview.md: The Job Interview"));
         assert!(p.contains("VIDEO MODE is not available"), "without a videos folder the tutor is told so");
         assert!(!p.contains("VIDEO QUEUE (random"));
+    }
+
+    #[test]
+    fn due_phrases_are_listed_for_the_review() {
+        let p = system_prompt("Teach.", "- a.md: A (1 cards)", None, Some(Review { total: 7, list: "1. around the clock | hint: x" }));
+        assert!(p.contains("REVIEW LIST (7 phrases are due; the weakest are listed first):\n1. around the clock | hint: x"));
+        assert!(p.contains("Begin a review lesson."));
     }
 
     #[test]
@@ -93,6 +118,7 @@ mod tests {
             "Teach.",
             "- 16_the_job_interview.md: The Job Interview (12 cards)",
             Some(VideoMode { transcripts_dir: Path::new("/data/transcript"), queue }),
+            None,
         );
         assert!(p.contains("VIDEOS folder (transcripts, Read works there): /data/transcript"));
         assert!(p.contains(queue));

@@ -43,6 +43,7 @@ cargo run --release -p client                                   # speak ("anothe
 cargo run --release -p client -- --text                         # type
 cargo run --release -p client -- --pause-ms 3000                # wait longer while you think (default 2000)
 cargo run --release -p client -- --video                        # video mode: a random video, then a drill on it
+cargo run --release -p client -- --review                       # repeat the phrases you handled badly
 ```
 
 At start the client checks the microphone (quiet, beep, say something, playback of what it heard; `--no-calibration` skips this). A short beep tells you when the microphone is open and you may speak. In video mode the
@@ -71,7 +72,23 @@ The full list is in `Instruction.md`. The table gives the words after "command".
 | "answer" / "I don't know" | the model answer, the link and a pause, as after a normal correction |
 | "pause" / "resume" | pause the lesson: the microphone stays on but nothing is answered (no beep) until "command resume" (or Enter) |
 | "In Russian" ("po russki"), no prefix needed | after a correction: the Russian version, then the next question |
+| "review" | repeat the phrases you missed that are due now (see Phrasebook) |
 | "video mode" / "random video" / "another video" / "next video" | a random video to watch, then a drill on it |
+
+## Phrasebook and review (spaced repetition)
+
+When you do not manage a phrase (a wrong answer, "I don't know", a skipped card), the tutor reports it
+and the server writes it into a CSV table, `~/.local/share/speech-trainer/phrases.csv`
+(`SPEECH_TRAINER_PHRASES` changes the path). Columns: `phrase, hint_ru, model_answer, source, url, box,
+due, fails, successes, last_seen`; it opens in any spreadsheet.
+
+Phrases come back by the **Leitner system**, a form of spaced repetition: review a fact just before you
+would forget it, and wait longer after every success. A phrase sits in a box 0 to 5. A miss puts it in
+box 0 (due at once); each success moves it one box up and the next review is 1, 3, 7, 14, then 30 days
+away; a new miss sends it back to box 0. `client --review` (or saying "command review" in a lesson)
+drills up to 10 due phrases, the weakest and longest overdue first. In an ordinary lesson the tutor
+mentions in the greeting how many phrases are waiting. Only phrases from the phrasebook are tracked;
+you can also edit the file by hand (for example move `due` to today to practise a phrase now).
 
 ## Progress
 
