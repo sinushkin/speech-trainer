@@ -54,9 +54,7 @@ fn show(msg: &ServerMsg, video: bool) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
-        .init();
+    protocol::logging::init("client", "warn");
 
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let args = match cli::parse(&raw, env).map_err(|e| anyhow::anyhow!("{e}\n{}", cli::USAGE))? {
@@ -134,13 +132,19 @@ async fn main() -> Result<()> {
     // "in Russian"); if nobody speaks it goes on by itself.
     let mut silence_window: Option<u32> = None; // announced by the server, armed at turn_done
     let mut continue_deadline: Option<tokio::time::Instant> = None;
+    // Once the socket held unread data while the loop sat idle (2026-11-10); a regular
+    // tick makes sure the connection is looked at even if a wake-up is ever lost.
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = tick.tick() => {}
             incoming = stream.next() => {
                 let Some(incoming) = incoming else { break };
                 match incoming.context("connection error")? {
                     Message::Text(t) => match serde_json::from_str::<ServerMsg>(&t) {
                         Ok(msg) => {
+                            tracing::info!("server says: {msg:?}");
                             show(&msg, args.video);
                             if matches!(msg, ServerMsg::SessionEnded { .. }) {
                                 break;
@@ -187,9 +191,12 @@ async fn main() -> Result<()> {
                         Err(e) => tracing::warn!("unreadable server message: {e}"),
                     },
                     Message::Binary(wav_bytes) => {
+                        let started = std::time::Instant::now();
+                        tracing::info!("audio part of {} bytes, playing", wav_bytes.len());
                         if let Err(e) = audio::play_wav(&wav_bytes, play_device.as_deref()).await {
                             tracing::warn!("playback failed: {e}");
                         }
+                        tracing::info!("audio part played in {:.1} s", started.elapsed().as_secs_f32());
                     }
                     Message::Close(_) => break,
                     _ => {}
@@ -200,6 +207,7 @@ async fn main() -> Result<()> {
                 // Someone already started speaking: that answer is coming, do not interrupt it.
                 if listening && !vad.in_speech() {
                     listening = false;
+                    tracing::info!("silence window over, telling the tutor to go on");
                     sink.send(Message::Text(serde_json::to_string(&ClientMsg::Continue)?.into())).await?;
                 }
             }
@@ -213,6 +221,7 @@ async fn main() -> Result<()> {
                 if let Some(utterance) = vad.feed(&frame) {
                     listening = false;
                     continue_deadline = None;
+                    tracing::info!("sending an utterance of {} ms", utterance.len() * 1000 / protocol::SAMPLE_RATE as usize);
                     sink.send(Message::Binary(wav::pcm16_to_bytes(&utterance).into())).await?;
                 }
             }

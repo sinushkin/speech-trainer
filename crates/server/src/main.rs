@@ -50,9 +50,7 @@ fn instruction_path() -> Result<PathBuf> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    protocol::logging::init("server", "info");
 
     let path = instruction_path()?;
     let instruction = instruction::load(&path).with_context(|| format!("bad instruction file {}", path.display()))?;

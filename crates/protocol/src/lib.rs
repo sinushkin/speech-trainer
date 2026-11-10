@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod logging;
 pub mod wav;
 
 /// Sample rate of audio the client sends (what speech recognisers expect).

@@ -133,7 +133,14 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
         if samples.len() < MIN_UTTERANCE_SAMPLES {
             return self.nothing_to_answer().await;
         }
+        let started = std::time::Instant::now();
         let heard = self.stt.transcribe(wav::encode_pcm16_mono(&samples, SAMPLE_RATE)).await;
+        tracing::info!(
+            "recognised {} ms of speech in {:.1} s: {:?}",
+            samples.len() * 1000 / SAMPLE_RATE as usize,
+            started.elapsed().as_secs_f32(),
+            heard.as_ref().map(|t| t.trim())
+        );
         match heard {
             Ok(text) if text.trim().is_empty() => self.nothing_to_answer().await,
             Ok(text) => self.on_text(&text).await,
@@ -180,10 +187,13 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
     }
 
     async fn run_turn(&mut self, user_text: &str) -> Result<(), Closed> {
+        let started = std::time::Instant::now();
+        tracing::info!("asking the tutor: {user_text:?}");
         let raw = match self.tutor.ask(user_text).await {
             Ok(r) => r,
             Err(e) => return self.fail(format!("tutor failed: {e}")).await,
         };
+        tracing::info!("the tutor answered in {:.1} s: {raw:?}", started.elapsed().as_secs_f32());
         let segments = markup::parse_reply(&raw);
         self.msg(ServerMsg::Reply { text: markup::display_text(&segments) }).await?;
         let mut go_on_alone = false;
@@ -224,6 +234,7 @@ impl<T: Tutor, S: Transcriber, V: Synthesizer> Session<T, S, V> {
             let after_ms = u32::try_from(self.continue_after.as_millis()).unwrap_or(u32::MAX);
             self.msg(ServerMsg::ContinueIfSilent { after_ms }).await?;
         }
+        tracing::info!("turn done, {:.1} s in all", started.elapsed().as_secs_f32());
         self.msg(ServerMsg::TurnDone).await
     }
 }
